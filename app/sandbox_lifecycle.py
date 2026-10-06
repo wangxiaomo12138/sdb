@@ -579,8 +579,9 @@ def _apig_post(url: str, *, json_body: dict[str, Any], action: str) -> dict[str,
 
 
 def _check_response(payload: dict[str, Any], action: str) -> dict[str, Any]:
+    # APIG 业务成功码为 200；兼容历史/部分环境返回 0
     code = payload.get("code")
-    if code is not None and code != 0:
+    if code is not None and code not in (0, 200):
         message = payload.get("message") or f"{action} failed with code={code}"
         logger.error(
             "APIG业务错误 动作=%s 业务码=%s 消息=%s 响应=%s",

@@ -26,9 +26,39 @@ class OpenCodeError(Exception):
     """沙箱或 OpenCode 执行失败。"""
 
 
+class SandboxHttpError(OpenCodeError):
+    """运行面 HTTP 错误；网关 502/503/504 可回退到 SDK 轮询。"""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+# APIG/前置网关常见超时码：SSE 长连接拿不到首包时会出现，Postman 同步 JSON 往往仍能通
+_GATEWAY_TIMEOUT_STATUSES = {502, 503, 504}
+_sse_disabled_reason: Optional[str] = None
+
+
 def _clean_output(text: str) -> str:
     text = _ANSI_RE.sub("", text or "")
     return "".join(ch for ch in text if ch in "\t\n\r" or ord(ch) >= 32).strip()
+
+
+def _log_http_request_for_postman(
+    *,
+    action: str,
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: Any,
+) -> None:
+    """把即将发出的 HTTP 请求原样打日志，便于复制到 Postman。"""
+    dump = json.dumps(
+        {"method": method, "url": url, "headers": headers, "body": body},
+        ensure_ascii=False,
+        indent=2,
+    )
+    logger.info("%s 请求原样(可复制到Postman)\n%s", action, dump)
 
 
 def _build_runtime_headers(sandbox_id: Optional[str] = None) -> dict[str, str]:
@@ -306,8 +336,19 @@ def _stream_via_api_sse(
         timeout,
         preview(command, 300),
     )
+    _log_http_request_for_postman(
+        action="沙箱SSE执行",
+        method="POST",
+        url=url,
+        headers=headers,
+        body=body,
+    )
     started = time.monotonic()
-    with httpx.Client(timeout=httpx.Timeout(timeout + 30.0)) as client:
+    # 与 APIG 客户端一致：不读系统代理，避免 Postman 直连能通、httpx 走代理 504
+    with httpx.Client(
+        timeout=httpx.Timeout(timeout + 30.0, connect=30.0),
+        trust_env=False,
+    ) as client:
         with client.stream("POST", url, headers=headers, json=body) as resp:
             content_type = (resp.headers.get("content-type") or "").lower()
             logger.info(
@@ -322,8 +363,9 @@ def _stream_via_api_sse(
                     resp.status_code,
                     preview(detail, 500),
                 )
-                raise OpenCodeError(
-                    f"sandbox request failed: HTTP {resp.status_code} {detail}"
+                raise SandboxHttpError(
+                    f"sandbox request failed: HTTP {resp.status_code} {detail}",
+                    resp.status_code,
                 )
 
             if "text/event-stream" in content_type:
@@ -410,22 +452,30 @@ def _stream_via_api_async_poll(
     command: str, timeout: float, sandbox_id: str
 ) -> Generator[str, None, None]:
     """兜底：异步执行 shell，再 view 轮询增量 stdout。"""
+    async_body = {
+        "command": command,
+        "timeout": min(5.0, timeout),
+        "hard_timeout": timeout,
+        "async_mode": True,
+        "truncate": False,
+    }
     logger.info(
         "沙箱异步轮询开始 sandbox_id=%s 超时秒=%s 命令=%s",
         sandbox_id,
         timeout,
         preview(command, 300),
     )
+    _log_http_request_for_postman(
+        action="沙箱异步执行",
+        method="POST",
+        url=f"{Config.SANDBOX_BASE_URL}/v1/shell/exec",
+        headers=_build_runtime_headers(sandbox_id),
+        body=async_body,
+    )
     started = time.monotonic()
     client = _build_client(timeout=timeout, sandbox_id=sandbox_id)
     try:
-        result = client.shell.exec_command(
-            command=command,
-            timeout=min(5.0, timeout),
-            hard_timeout=timeout,
-            async_mode=True,
-            truncate=False,
-        )
+        result = client.shell.exec_command(**async_body)
     except Exception as exc:
         logger.error("沙箱异步执行失败 错误=%s", preview(exc, 500))
         raise OpenCodeError(f"sandbox request failed: {exc}") from exc
@@ -584,24 +634,43 @@ def _stream_via_api_async_poll(
     raise OpenCodeError(f"opencode timed out after {timeout}s")
 
 
+def _should_fallback_from_sse(exc: Exception) -> bool:
+    if isinstance(exc, SandboxHttpError):
+        return exc.status_code in _GATEWAY_TIMEOUT_STATUSES
+    return not isinstance(exc, OpenCodeError)
+
+
 def _stream_command_lines(
     command: str, timeout: float, sandbox_id: str
 ) -> Generator[str, None, None]:
+    global _sse_disabled_reason
     if Config.SANDBOX_DOCKER_CONTAINER:
         logger.info("执行路径=Docker sandbox_id=%s", sandbox_id)
         yield from _stream_via_docker(command, timeout)
         return
 
+    if _sse_disabled_reason:
+        logger.info(
+            "执行路径=异步轮询（已跳过SSE） sandbox_id=%s 原因=%s",
+            sandbox_id,
+            _sse_disabled_reason,
+        )
+        yield from _stream_via_api_async_poll(command, timeout, sandbox_id)
+        return
+
     logger.info("执行路径=优先SSE sandbox_id=%s", sandbox_id)
     try:
         yield from _stream_via_api_sse(command, timeout, sandbox_id)
-    except OpenCodeError:
-        raise
     except Exception as exc:
+        if not _should_fallback_from_sse(exc):
+            raise
+        reason = str(exc)
+        if isinstance(exc, SandboxHttpError) and exc.status_code in _GATEWAY_TIMEOUT_STATUSES:
+            _sse_disabled_reason = f"HTTP {exc.status_code}"
         logger.warning(
             "SSE执行失败，回退异步轮询 sandbox_id=%s 错误=%s",
             sandbox_id,
-            preview(exc, 300),
+            preview(reason, 300),
         )
         yield from _stream_via_api_async_poll(command, timeout, sandbox_id)
 
