@@ -60,6 +60,7 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_APIG_TIMEOUT_SECONDS` | `120` | APIG 整次请求超时 |
 | `SANDBOX_APIG_PROXY` | 空 | `requests`/`httpx` 可用；可选 HTTP 代理 |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
+| `SANDBOX_ENV_VARS` | 空 | JSON 对象；非空时创建沙箱带 `envVars`（如 `{"OPENCODE_API_KEY":"..."}`） |
 | `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` 数组 |
 | `SANDBOX_X_MOUNTS_SUBPATH` | 空 | 用户空间挂载子路径（可选） |
 | `SANDBOX_X_MOUNTS_MOUNT_PATH` | 空 | 沙箱内挂载路径（可选） |

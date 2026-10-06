@@ -1,3 +1,4 @@
+import json
 import os
 from typing import Any, Optional
 
@@ -52,6 +53,9 @@ class Config:
         os.getenv("SANDBOX_READY_TIMEOUT_SECONDS", "15")
     )
 
+    # 创建沙箱时的环境变量（APIG body.envVars）；JSON 对象，空则不传
+    SANDBOX_ENV_VARS = os.getenv("SANDBOX_ENV_VARS", "").strip()
+
     # 创建沙箱时的用户空间绑定（APIG body.X-mounts）；workspaceId 为空则不传
     SANDBOX_X_MOUNTS_WORKSPACE_ID = os.getenv(
         "SANDBOX_X_MOUNTS_WORKSPACE_ID", ""
@@ -104,6 +108,38 @@ class Config:
         if cls.SANDBOX_DOCKER_CONTAINER:
             return "docker"
         return "apig"
+
+    @classmethod
+    def build_env_vars(cls) -> Optional[dict[str, str]]:
+        """组装创建沙箱请求的 envVars；未配置或空对象时返回 None。"""
+        raw = cls.SANDBOX_ENV_VARS
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"SANDBOX_ENV_VARS must be a JSON object, got {raw!r}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"SANDBOX_ENV_VARS must be a JSON object, got {type(parsed).__name__}"
+            )
+        env_vars: dict[str, str] = {}
+        for key, value in parsed.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError("SANDBOX_ENV_VARS keys must be non-empty strings")
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                env_vars[key] = "true" if value else "false"
+            elif isinstance(value, (str, int, float)):
+                env_vars[key] = str(value)
+            else:
+                raise ValueError(
+                    f"SANDBOX_ENV_VARS[{key!r}] must be a string, got {type(value).__name__}"
+                )
+        return env_vars or None
 
     @classmethod
     def build_x_mounts(cls) -> Optional[list[dict[str, Any]]]:
