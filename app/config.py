@@ -64,6 +64,15 @@ class Config:
     # verify=false 时跳过证书校验；CA_BUNDLE 非空时优先用作 verify 路径
     SANDBOX_APIG_SSL_VERIFY = _optional_bool("SANDBOX_APIG_SSL_VERIFY", True)
     SANDBOX_APIG_CA_BUNDLE = os.getenv("SANDBOX_APIG_CA_BUNDLE", "").strip()
+    # TLS 版本：空=系统默认；隔离网握手超时可试 1.2
+    SANDBOX_APIG_TLS_VERSION = os.getenv("SANDBOX_APIG_TLS_VERSION", "1.2").strip()
+    SANDBOX_APIG_TIMEOUT_SECONDS = float(
+        os.getenv("SANDBOX_APIG_TIMEOUT_SECONDS", "120")
+    )
+    SANDBOX_APIG_CONNECT_TIMEOUT_SECONDS = float(
+        os.getenv("SANDBOX_APIG_CONNECT_TIMEOUT_SECONDS", "30")
+    )
+    SANDBOX_APIG_PROXY = os.getenv("SANDBOX_APIG_PROXY", "").strip()
 
     # OpenCode 模型，格式 provider/model，例如 local/Qwen3.6-35B-A3B-oQ4-mtp
     OPENCODE_MODEL = os.getenv(

@@ -51,6 +51,10 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_TEMPLATE_ID` | 空 | 创建沙箱必填模板 ID |
 | `SANDBOX_APIG_SSL_VERIFY` | `true` | APIG HTTPS 证书校验；隔离网自签可设 `false` |
 | `SANDBOX_APIG_CA_BUNDLE` | 空 | 企业 CA 证书文件路径；非空时优先生效 |
+| `SANDBOX_APIG_TLS_VERSION` | `1.2` | TLS 版本；握手超时可保持 `1.2` |
+| `SANDBOX_APIG_CONNECT_TIMEOUT_SECONDS` | `30` | APIG TCP/TLS 握手超时 |
+| `SANDBOX_APIG_TIMEOUT_SECONDS` | `120` | APIG 整次请求超时 |
+| `SANDBOX_APIG_PROXY` | 空 | 可选 HTTP 代理，如 `http://host:port` |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
 | `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` 数组 |
 | `SANDBOX_X_MOUNTS_SUBPATH` | 空 | 用户空间挂载子路径（可选） |
