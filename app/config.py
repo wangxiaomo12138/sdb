@@ -81,16 +81,16 @@ class Config:
         return "apig"
 
     @classmethod
-    def build_x_mounts(cls) -> Optional[dict[str, Any]]:
-        """组装创建沙箱请求的 X-mounts；未配置 workspaceId 时返回 None。"""
+    def build_x_mounts(cls) -> Optional[list[dict[str, Any]]]:
+        """组装创建沙箱请求的 X-mounts（对象数组）；未配置 workspaceId 时返回 None。"""
         workspace_id = cls.SANDBOX_X_MOUNTS_WORKSPACE_ID
         if not workspace_id:
             return None
-        mounts: dict[str, Any] = {"workspaceId": workspace_id}
+        item: dict[str, Any] = {"workspaceId": workspace_id}
         if cls.SANDBOX_X_MOUNTS_SUBPATH:
-            mounts["subpath"] = cls.SANDBOX_X_MOUNTS_SUBPATH
+            item["subpath"] = cls.SANDBOX_X_MOUNTS_SUBPATH
         if cls.SANDBOX_X_MOUNTS_MOUNT_PATH:
-            mounts["mountPath"] = cls.SANDBOX_X_MOUNTS_MOUNT_PATH
+            item["mountPath"] = cls.SANDBOX_X_MOUNTS_MOUNT_PATH
         if cls.SANDBOX_X_MOUNTS_READ_ONLY is not None:
-            mounts["readOnly"] = cls.SANDBOX_X_MOUNTS_READ_ONLY
-        return mounts
+            item["readOnly"] = cls.SANDBOX_X_MOUNTS_READ_ONLY
+        return [item]

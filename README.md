@@ -50,7 +50,7 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_APIG_HW_APPKEY` | 空 | header `X-HW-APPKEY` |
 | `SANDBOX_TEMPLATE_ID` | 空 | 创建沙箱必填模板 ID |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
-| `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` |
+| `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` 数组 |
 | `SANDBOX_X_MOUNTS_SUBPATH` | 空 | 用户空间挂载子路径（可选） |
 | `SANDBOX_X_MOUNTS_MOUNT_PATH` | 空 | 沙箱内挂载路径（可选） |
 | `SANDBOX_X_MOUNTS_READ_ONLY` | 空 | `true`/`false`；空则不传该字段 |
