@@ -37,6 +37,27 @@ def _apig_base() -> str:
     return endpoint.rstrip("/")
 
 
+def _apig_client(timeout: float) -> httpx.Client:
+    verify = Config.apig_ssl_verify()
+    logger.info(
+        "创建APIG客户端 超时秒=%s SSL校验=%s",
+        timeout,
+        verify if isinstance(verify, str) else ("开启" if verify else "关闭"),
+    )
+    return httpx.Client(timeout=timeout, verify=verify)
+
+
+def _wrap_http_error(action: str, exc: Exception) -> SandboxLifecycleError:
+    text = str(exc)
+    tip = ""
+    if "CERTIFICATE_VERIFY_FAILED" in text or "ssl" in text.lower():
+        tip = (
+            "；疑似HTTPS证书校验失败，隔离网可在.env设置 "
+            "SANDBOX_APIG_SSL_VERIFY=false，或配置 SANDBOX_APIG_CA_BUNDLE=企业CA路径"
+        )
+    return SandboxLifecycleError(f"{action} failed: {exc}{tip}")
+
+
 def _check_response(payload: dict[str, Any], action: str) -> dict[str, Any]:
     code = payload.get("code")
     if code is not None and code != 0:
@@ -84,7 +105,7 @@ def create_sandbox(
     )
     with log_step(logger, "APIG创建沙箱", template_id=tid):
         try:
-            with httpx.Client(timeout=60.0) as client:
+            with _apig_client(60.0) as client:
                 resp = client.post(url, headers=_apig_headers(), json=body)
                 logger.info(
                     "APIG创建沙箱HTTP响应 状态码=%s Content-Type=%s 正文=%s",
@@ -95,9 +116,7 @@ def create_sandbox(
                 resp.raise_for_status()
                 payload = resp.json()
         except httpx.HTTPError as exc:
-            raise SandboxLifecycleError(
-                f"create sandbox request failed: {exc}"
-            ) from exc
+            raise _wrap_http_error("create sandbox request", exc) from exc
         except ValueError as exc:
             raise SandboxLifecycleError(
                 f"create sandbox invalid JSON: {exc}"
@@ -136,7 +155,7 @@ def refresh_sandbox(
     )
     with log_step(logger, "APIG续期沙箱", sandbox_id=sandbox_id, duration=ttl):
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with _apig_client(30.0) as client:
                 resp = client.post(
                     url, headers=_apig_headers(), json={"duration": ttl}
                 )
@@ -148,9 +167,7 @@ def refresh_sandbox(
                 resp.raise_for_status()
                 payload = resp.json()
         except httpx.HTTPError as exc:
-            raise SandboxLifecycleError(
-                f"refresh sandbox request failed: {exc}"
-            ) from exc
+            raise _wrap_http_error("refresh sandbox request", exc) from exc
         except ValueError as exc:
             raise SandboxLifecycleError(
                 f"refresh sandbox invalid JSON: {exc}"

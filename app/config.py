@@ -60,6 +60,11 @@ class Config:
     SANDBOX_X_MOUNTS_MOUNT_PATH = os.getenv("SANDBOX_X_MOUNTS_MOUNT_PATH", "").strip()
     SANDBOX_X_MOUNTS_READ_ONLY = _optional_bool("SANDBOX_X_MOUNTS_READ_ONLY")
 
+    # APIG HTTPS：隔离网自签/内网证书可关校验，或指定 CA 文件
+    # verify=false 时跳过证书校验；CA_BUNDLE 非空时优先用作 verify 路径
+    SANDBOX_APIG_SSL_VERIFY = _optional_bool("SANDBOX_APIG_SSL_VERIFY", True)
+    SANDBOX_APIG_CA_BUNDLE = os.getenv("SANDBOX_APIG_CA_BUNDLE", "").strip()
+
     # OpenCode 模型，格式 provider/model，例如 local/Qwen3.6-35B-A3B-oQ4-mtp
     OPENCODE_MODEL = os.getenv(
         "OPENCODE_MODEL", "local/Qwen3.6-35B-A3B-oQ4-mtp"
@@ -94,3 +99,10 @@ class Config:
         if cls.SANDBOX_X_MOUNTS_READ_ONLY is not None:
             item["readOnly"] = cls.SANDBOX_X_MOUNTS_READ_ONLY
         return [item]
+
+    @classmethod
+    def apig_ssl_verify(cls) -> bool | str:
+        """httpx verify：CA 文件路径，或 True/False。"""
+        if cls.SANDBOX_APIG_CA_BUNDLE:
+            return cls.SANDBOX_APIG_CA_BUNDLE
+        return bool(cls.SANDBOX_APIG_SSL_VERIFY)
