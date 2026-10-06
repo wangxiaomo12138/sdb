@@ -617,8 +617,8 @@ def create_sandbox(
 
     x_mounts = Config.build_x_mounts()
     if x_mounts is not None:
-        # 与 APIG 文档字段名一致：X-mounts
-        body["X-mounts"] = x_mounts
+        # 请求体字段为小写 x-mounts，网关按大小写区分
+        body["x-mounts"] = x_mounts
 
     url = f"{_apig_base()}/livefunction/sandboxes"
     logger.info(
