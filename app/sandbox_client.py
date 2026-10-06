@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _PROVIDER_ERROR_RE = re.compile(r"(?im)^(error:|Error from provider)")
+# AIO 常驻 shell 会话损坏时，服务端会把这条 Python 异常当命令结果返回
+_ERROR_OBSERVATION_RE = re.compile(
+    r"ErrorObservation|object has no attribute ['\"]?exit_code",
+    re.I,
+)
 
 
 class OpenCodeError(Exception):
@@ -119,11 +124,12 @@ def _build_opencode_command(
     session_flag = ""
     if opencode_session_id:
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
-    lines = _opencode_env_exports()
-    lines.append(
+    parts = _opencode_env_exports()
+    parts.append(
         f"opencode run --format json {session_flag}{model_flag}{quoted}"
     )
-    command = "\n".join(lines)
+    # 必须单行：AIO 常驻 shell 遇到换行会返回 ErrorObservation（无 exit_code）
+    command = "; ".join(parts)
     logger.info(
         "已构建OpenCode命令 模型=%s opencode_session_id=%s 问题=%s",
         Config.OPENCODE_MODEL or "(default)",
@@ -132,6 +138,20 @@ def _build_opencode_command(
     )
     logger.info("OpenCode命令原样(可复制调试)\n%s", command)
     return command
+
+
+def _wrap_api_shell_command(command: str) -> str:
+    """API 路径在常驻 shell 里再包一层 bash -lc，避免 export/换行弄坏会话。"""
+    return f"bash -lc {shlex.quote(command)}"
+
+
+def _raise_if_error_observation(*parts: Any) -> None:
+    text = " ".join("" if p is None else str(p) for p in parts)
+    if _ERROR_OBSERVATION_RE.search(text):
+        raise OpenCodeError(
+            "sandbox shell session corrupted "
+            "(ErrorObservation has no exit_code); retry after a new sandbox"
+        )
 
 
 def _iter_ndjson_lines(chunks: Iterable[str]) -> Generator[str, None, None]:
@@ -220,6 +240,15 @@ def _parse_opencode_events(
             preview(joined, 500),
         )
         if joined:
+            if _ERROR_OBSERVATION_RE.search(joined):
+                yield {
+                    "type": "error",
+                    "message": (
+                        "sandbox shell session corrupted "
+                        "(ErrorObservation has no exit_code); retry after a new sandbox"
+                    ),
+                }
+                return
             if _PROVIDER_ERROR_RE.search(joined):
                 yield {"type": "error", "message": f"opencode failed: {joined}"}
                 return
@@ -457,6 +486,9 @@ def _stream_via_api_sse(
             if isinstance(data, dict):
                 output = data.get("output") or ""
                 exit_code = data.get("exit_code")
+            elif data is not None:
+                output = getattr(data, "output", None) or str(data)
+                exit_code = getattr(data, "exit_code", None)
             logger.info(
                 "沙箱同步JSON结果 成功=%s 退出码=%s 输出字符数=%s "
                 "消息=%s 耗时毫秒=%.1f",
@@ -466,6 +498,7 @@ def _stream_via_api_sse(
                 preview(message),
                 (time.monotonic() - started) * 1000,
             )
+            _raise_if_error_observation(message, output)
             if success is False or (exit_code is not None and exit_code != 0):
                 detail = _clean_output(output or message or f"exit_code={exit_code}")
                 raise OpenCodeError(f"opencode failed: {detail}")
@@ -546,6 +579,7 @@ def _stream_via_api_async_poll(
             len(output or ""),
             (time.monotonic() - started) * 1000,
         )
+        _raise_if_error_observation(message, output)
         if success is False or (exit_code is not None and exit_code != 0):
             detail = _clean_output(output or message or f"exit_code={exit_code}")
             raise OpenCodeError(f"opencode failed: {detail}")
@@ -680,12 +714,16 @@ def _stream_command_lines(
             sandbox_id,
             _sse_disabled_reason,
         )
-        yield from _stream_via_api_async_poll(command, timeout, sandbox_id)
+        api_command = _wrap_api_shell_command(command)
+        logger.info("API执行命令原样(可复制调试)\n%s", api_command)
+        yield from _stream_via_api_async_poll(api_command, timeout, sandbox_id)
         return
 
     logger.info("执行路径=优先SSE sandbox_id=%s", sandbox_id)
+    api_command = _wrap_api_shell_command(command)
+    logger.info("API执行命令原样(可复制调试)\n%s", api_command)
     try:
-        yield from _stream_via_api_sse(command, timeout, sandbox_id)
+        yield from _stream_via_api_sse(api_command, timeout, sandbox_id)
     except Exception as exc:
         if not _should_fallback_from_sse(exc):
             raise
@@ -697,7 +735,7 @@ def _stream_command_lines(
             sandbox_id,
             preview(reason, 300),
         )
-        yield from _stream_via_api_async_poll(command, timeout, sandbox_id)
+        yield from _stream_via_api_async_poll(api_command, timeout, sandbox_id)
 
 
 def stream_opencode(
