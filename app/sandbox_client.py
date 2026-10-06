@@ -98,16 +98,16 @@ def _shell_double_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _opencode_env_prefix() -> str:
+def _opencode_env_exports() -> list[str]:
     env_vars = Config.build_env_vars()
     if not env_vars:
-        return ""
+        return []
     exports: list[str] = []
     for key, value in env_vars.items():
         if not _ENV_VAR_NAME_RE.fullmatch(key):
             raise OpenCodeError(f"invalid SANDBOX_ENV_VARS key: {key!r}")
         exports.append(f"export {key}={_shell_double_quote(value)}")
-    return " && ".join(exports) + " && "
+    return exports
 
 
 def _build_opencode_command(
@@ -119,21 +119,18 @@ def _build_opencode_command(
     session_flag = ""
     if opencode_session_id:
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
-    env_prefix = _opencode_env_prefix()
-    # 沙箱内 OpenCode 1.x 用 --dangerously-skip-permissions 自动批准，不是新版 --auto
-    command = (
-        f"{env_prefix}"
-        "opencode run --dangerously-skip-permissions --format json "
-        f"{session_flag}{model_flag}{quoted}"
+    lines = _opencode_env_exports()
+    lines.append(
+        f"opencode run --format json {session_flag}{model_flag}{quoted}"
     )
+    command = "\n".join(lines)
     logger.info(
-        "已构建OpenCode命令 模型=%s opencode_session_id=%s 问题=%s "
-        "命令预览=%s",
+        "已构建OpenCode命令 模型=%s opencode_session_id=%s 问题=%s",
         Config.OPENCODE_MODEL or "(default)",
         opencode_session_id or "(new)",
         preview(query),
-        preview(command, 300),
     )
+    logger.info("OpenCode命令原样(可复制调试)\n%s", command)
     return command
 
 

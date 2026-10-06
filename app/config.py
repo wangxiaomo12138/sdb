@@ -4,7 +4,8 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# 关闭插值，避免 SANDBOX_ENV_VARS 里的 $PATH 被本机环境展开
+load_dotenv(interpolate=False)
 
 
 def _optional_int(name: str, default: int | None = None) -> int | None:

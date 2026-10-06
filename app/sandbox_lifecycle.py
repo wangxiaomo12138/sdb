@@ -617,13 +617,17 @@ def create_sandbox(
         body["x-mounts"] = x_mounts
 
     url = f"{_apig_base()}/livefunction/sandboxes"
-    logger.info(
-        "调用APIG创建沙箱 地址=%s 模板ID=%s 超时秒=%s X-mounts=%s",
-        url,
-        tid,
-        instance_timeout,
-        preview(x_mounts) if x_mounts is not None else "(未配置)",
+    request_dump = json.dumps(
+        {
+            "method": "POST",
+            "url": url,
+            "headers": _apig_headers(),
+            "body": body,
+        },
+        ensure_ascii=False,
+        indent=2,
     )
+    logger.info("创建沙箱请求原样(可复制调试)\n%s", request_dump)
     with log_step(logger, "APIG创建沙箱", template_id=tid):
         payload = _apig_post(url, json_body=body, action="create sandbox request")
 

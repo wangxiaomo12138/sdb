@@ -186,15 +186,13 @@ def _build_runtime_headers(sandbox_id: Optional[str] = None) -> dict[str, str]:
 
 ### 6.5 OpenCode 命令：JSON 流 + 续聊
 
-```56:70:app/sandbox_client.py
+```python
 def _build_opencode_command(query: str, *, opencode_session_id: Optional[str] = None) -> str:
-    # opencode run --dangerously-skip-permissions --format json
-    #            [--session ses_xxx] -m <model> '<query>'
+    # opencode run --format json [--session ses_xxx] -m <model> '<query>'
 ```
 
 - `--format json`：stdout 一行一个事件，带 `sessionID`、`type=text` 等。
 - `--session`：仅当 manager 里已有 OpenCode ID（第二轮起）。
-- `--dangerously-skip-permissions`：沙箱内 OpenCode 1.x 自动批准工具调用（不是新版 `--auto`）。
 - `shlex.quote`：防止 query 注入 shell。
 
 ### 6.6 主编排：`stream_opencode`
