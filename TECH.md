@@ -98,7 +98,7 @@ app/
 
 ## 5. 配置分层
 
-**管理面：** `SANDBOX_APIG_ENDPOINT`、`SANDBOX_APIG_HW_ID`、`SANDBOX_APIG_HW_APPKEY`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_INSTANCE_TIMEOUT`、`SANDBOX_ENV_VARS`、`SANDBOX_REFRESH_DURATION`
+**管理面：** `SANDBOX_APIG_ENDPOINT`、`SANDBOX_APIG_HW_ID`、`SANDBOX_APIG_HW_APPKEY`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_INSTANCE_TIMEOUT`、`SANDBOX_REFRESH_DURATION`
 
 **运行面：** `SANDBOX_BASE_URL`；请求头：
 
@@ -108,7 +108,7 @@ app/
 | `x-livefunction-sandbox-id` | 当前会话的 `sandboxId` |
 | `X-AIO-API-Key` / `Authorization` | 可选 `SANDBOX_API_KEY` |
 
-**执行：** `OPENCODE_MODEL`、`OPENCODE_TIMEOUT_SECONDS`
+**执行：** `OPENCODE_MODEL`、`OPENCODE_TIMEOUT_SECONDS`、`SANDBOX_ENV_VARS`
 
 **本地：** 设置 `SANDBOX_DOCKER_CONTAINER` 后不调 APIG，`sandbox_id` 用合成值 `docker:{session_id}`。
 
@@ -278,7 +278,7 @@ SSE 路径里 `OpenCodeError` 不吞掉（HTTP 4xx 等直接失败）；其它�
 
 - Python 3.10+，依赖见 `requirements.txt`（Flask、httpx、agent-sandbox、gunicorn）。
 - gunicorn **必须** `-w 1`。
-- 沙箱镜像内需要可用的 `opencode` 及模型凭证。APIG 创建时可在 `SANDBOX_ENV_VARS`（JSON）中注入 `OPENCODE_API_KEY` 等，写入请求体 `envVars`。
+- 沙箱镜像内需要可用的 `opencode` 及模型凭证。可在 `SANDBOX_ENV_VARS`（JSON）中配置，于执行 `opencode` 前 `export`（例如 `PATH`、`XDG_CONFIG_HOME`、`OPENCODE_API_KEY`）。
 - 对话时长受 `OPENCODE_TIMEOUT_SECONDS` 与沙箱 TTL 限制。任务执行中若剩余 TTL 进入 120s 窗口会 refresh 900s；空闲不续期。
 
 ## 9. 扩展时注意

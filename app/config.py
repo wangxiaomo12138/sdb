@@ -53,7 +53,7 @@ class Config:
         os.getenv("SANDBOX_READY_TIMEOUT_SECONDS", "15")
     )
 
-    # 创建沙箱时的环境变量（APIG body.envVars）；JSON 对象，空则不传
+    # 执行 opencode 时注入的环境变量；JSON 对象，空则不附加 export
     SANDBOX_ENV_VARS = os.getenv("SANDBOX_ENV_VARS", "").strip()
 
     # 创建沙箱时的用户空间绑定（APIG body.X-mounts）；workspaceId 为空则不传
@@ -111,7 +111,7 @@ class Config:
 
     @classmethod
     def build_env_vars(cls) -> Optional[dict[str, str]]:
-        """组装创建沙箱请求的 envVars；未配置或空对象时返回 None。"""
+        """解析 SANDBOX_ENV_VARS；未配置或空对象时返回 None。"""
         raw = cls.SANDBOX_ENV_VARS
         if not raw:
             return None

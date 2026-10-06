@@ -18,7 +18,7 @@ Client -> POST /api/chat (SSE) 或 POST /api/query (异步轮询)
 
 - Python 3.10+（推荐 3.10）
 - 远程沙箱容器内 `opencode` 可用
-- 沙箱需配置可用模型凭证（启动时注入 `OPENCODE_API_KEY` + `OPENCODE_MODEL`，或写入 `~/.config/opencode/config.json` / `OPENCODE_JSON`）。未配置时任务会以 `failed` / SSE `error` 返回 provider 错误。
+- 沙箱需配置可用模型凭证（通过 `SANDBOX_ENV_VARS` 在执行 `opencode` 时注入，例如 `OPENCODE_API_KEY`，或写入 `~/.config/opencode/config.json` / `OPENCODE_JSON`）。未配置时任务会以 `failed` / SSE `error` 返回 provider 错误。
 
 ## 快速开始
 
@@ -60,7 +60,7 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_APIG_TIMEOUT_SECONDS` | `120` | APIG 整次请求超时 |
 | `SANDBOX_APIG_PROXY` | 空 | `requests`/`httpx` 可用；可选 HTTP 代理 |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
-| `SANDBOX_ENV_VARS` | 空 | JSON 对象；非空时创建沙箱带 `envVars`（如 `{"OPENCODE_API_KEY":"..."}`） |
+| `SANDBOX_ENV_VARS` | 空 | JSON 对象；非空时在执行 `opencode` 前 `export`（如 `{"PATH":"xxx/bin:$PATH"}`） |
 | `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` 数组 |
 | `SANDBOX_X_MOUNTS_SUBPATH` | 空 | 用户空间挂载子路径（可选） |
 | `SANDBOX_X_MOUNTS_MOUNT_PATH` | 空 | 沙箱内挂载路径（可选） |

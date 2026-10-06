@@ -15,7 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter
 
 from app.config import Config
-from app.logging_utils import log_step, mask_secret, preview
+from app.logging_utils import log_step, preview
 
 logger = logging.getLogger(__name__)
 
@@ -611,10 +611,6 @@ def create_sandbox(
     if instance_timeout is not None:
         body["timeout"] = instance_timeout
 
-    env_vars = Config.build_env_vars()
-    if env_vars is not None:
-        body["envVars"] = env_vars
-
     x_mounts = Config.build_x_mounts()
     if x_mounts is not None:
         # 请求体字段为小写 x-mounts，网关按大小写区分
@@ -622,15 +618,10 @@ def create_sandbox(
 
     url = f"{_apig_base()}/livefunction/sandboxes"
     logger.info(
-        "调用APIG创建沙箱 地址=%s 模板ID=%s 超时秒=%s envVars=%s X-mounts=%s",
+        "调用APIG创建沙箱 地址=%s 模板ID=%s 超时秒=%s X-mounts=%s",
         url,
         tid,
         instance_timeout,
-        (
-            preview({k: mask_secret(v) for k, v in env_vars.items()})
-            if env_vars is not None
-            else "(未配置)"
-        ),
         preview(x_mounts) if x_mounts is not None else "(未配置)",
     )
     with log_step(logger, "APIG创建沙箱", template_id=tid):

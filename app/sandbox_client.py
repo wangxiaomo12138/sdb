@@ -84,6 +84,32 @@ def _build_client(timeout: float, sandbox_id: Optional[str] = None) -> Sandbox:
     )
 
 
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _shell_double_quote(value: str) -> str:
+    """双引号包裹，保留 $VAR 展开；转义 \\ \" `。"""
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("`", "\\`")
+        .replace("\n", " ")
+    )
+    return f'"{escaped}"'
+
+
+def _opencode_env_prefix() -> str:
+    env_vars = Config.build_env_vars()
+    if not env_vars:
+        return ""
+    exports: list[str] = []
+    for key, value in env_vars.items():
+        if not _ENV_VAR_NAME_RE.fullmatch(key):
+            raise OpenCodeError(f"invalid SANDBOX_ENV_VARS key: {key!r}")
+        exports.append(f"export {key}={_shell_double_quote(value)}")
+    return " && ".join(exports) + " && "
+
+
 def _build_opencode_command(
     query: str, *, opencode_session_id: Optional[str] = None
 ) -> str:
@@ -93,8 +119,10 @@ def _build_opencode_command(
     session_flag = ""
     if opencode_session_id:
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
+    env_prefix = _opencode_env_prefix()
     # 沙箱内 OpenCode 1.x 用 --dangerously-skip-permissions 自动批准，不是新版 --auto
     command = (
+        f"{env_prefix}"
         "opencode run --dangerously-skip-permissions --format json "
         f"{session_flag}{model_flag}{quoted}"
     )
