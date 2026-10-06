@@ -41,6 +41,7 @@ class SessionSandboxManager:
         self._lock = threading.RLock()
         self._keeper_stop = threading.Event()
         self._keeper_thread: Optional[threading.Thread] = None
+        logger.info("会话沙箱管理器已初始化")
 
     def get(self, session_id: str) -> Optional[SessionSandboxBinding]:
         with self._lock:
@@ -52,33 +53,86 @@ class SessionSandboxManager:
         with self._lock:
             binding = self._bindings.get(session_id)
             if binding is None:
+                logger.warning(
+                    "绑定OpenCode会话跳过：找不到会话映射 session_id=%s",
+                    session_id,
+                )
                 return
+            old = binding.opencode_session_id
             binding.opencode_session_id = opencode_session_id
+        logger.info(
+            "已绑定OpenCode会话 session_id=%s sandbox_id=%s "
+            "opencode_session_id=%s 原值=%s",
+            session_id,
+            binding.sandbox_id,
+            opencode_session_id,
+            old or "(无)",
+        )
 
     def clear_opencode_session_id(self, session_id: str) -> None:
         with self._lock:
             binding = self._bindings.get(session_id)
             if binding is None:
                 return
+            old = binding.opencode_session_id
             binding.opencode_session_id = None
+        if old:
+            logger.warning(
+                "已清除OpenCode会话 session_id=%s sandbox_id=%s "
+                "原opencode_session_id=%s",
+                session_id,
+                binding.sandbox_id,
+                old,
+            )
 
     def drop(self, session_id: str) -> None:
         with self._lock:
-            self._bindings.pop(session_id, None)
+            binding = self._bindings.pop(session_id, None)
+        if binding is not None:
+            logger.info(
+                "已删除会话沙箱映射 session_id=%s sandbox_id=%s",
+                session_id,
+                binding.sandbox_id,
+            )
 
     def begin_task(self, session_id: str) -> None:
         with self._lock:
             binding = self._bindings.get(session_id)
             if binding is None:
+                logger.warning(
+                    "任务开始计数跳过：找不到会话映射 session_id=%s", session_id
+                )
                 return
             binding.active_count += 1
+            active = binding.active_count
+            sandbox_id = binding.sandbox_id
+        logger.info(
+            "任务占用沙箱开始 session_id=%s sandbox_id=%s 进行中任务数=%s",
+            session_id,
+            sandbox_id,
+            active,
+        )
 
     def end_task(self, session_id: str) -> None:
         with self._lock:
             binding = self._bindings.get(session_id)
             if binding is None:
+                logger.warning(
+                    "任务结束计数跳过：找不到会话映射 session_id=%s", session_id
+                )
                 return
             binding.active_count = max(0, binding.active_count - 1)
+            active = binding.active_count
+            sandbox_id = binding.sandbox_id
+            remaining = binding.expires_at - time.monotonic()
+        logger.info(
+            "任务占用沙箱结束 session_id=%s sandbox_id=%s 进行中任务数=%s "
+            "剩余TTL秒=%.1f",
+            session_id,
+            sandbox_id,
+            active,
+            remaining,
+        )
 
     def ensure_sandbox(self, session_id: str) -> SessionSandboxBinding:
         """确保 session_id 已绑定未过期沙箱。空闲超时后下次请求再创建。
@@ -89,6 +143,7 @@ class SessionSandboxManager:
             raise SandboxLifecycleError("session_id is required")
 
         session_id = session_id.strip()
+        logger.info("开始确保沙箱可用 session_id=%s", session_id)
 
         if Config.SANDBOX_DOCKER_CONTAINER:
             with self._lock:
@@ -99,20 +154,51 @@ class SessionSandboxManager:
                         expires_at=time.monotonic() + 24 * 3600,
                     )
                     self._bindings[session_id] = binding
+                    logger.info(
+                        "Docker模式新建会话映射 session_id=%s sandbox_id=%s "
+                        "容器名=%s",
+                        session_id,
+                        binding.sandbox_id,
+                        Config.SANDBOX_DOCKER_CONTAINER,
+                    )
+                else:
+                    logger.info(
+                        "Docker模式复用会话映射 session_id=%s sandbox_id=%s "
+                        "opencode_session_id=%s 进行中任务数=%s",
+                        session_id,
+                        binding.sandbox_id,
+                        binding.opencode_session_id or "(无)",
+                        binding.active_count,
+                    )
                 return binding
 
         with self._lock:
             binding = self._bindings.get(session_id)
             if binding is not None and time.monotonic() < binding.expires_at:
+                remaining = binding.expires_at - time.monotonic()
+                logger.info(
+                    "复用未过期沙箱 session_id=%s sandbox_id=%s "
+                    "opencode_session_id=%s 进行中任务数=%s 剩余TTL秒=%.1f",
+                    session_id,
+                    binding.sandbox_id,
+                    binding.opencode_session_id or "(无)",
+                    binding.active_count,
+                    remaining,
+                )
                 return binding
             if binding is not None:
                 logger.info(
-                    "sandbox expired session=%s sandbox=%s, recreating",
+                    "沙箱已过期，准备重建 session_id=%s sandbox_id=%s",
                     session_id,
                     binding.sandbox_id,
                 )
                 self._bindings.pop(session_id, None)
+            else:
+                logger.info(
+                    "尚无会话映射，准备创建沙箱 session_id=%s", session_id
+                )
 
+        started = time.monotonic()
         sandbox_id, ttl = create_and_wait()
         binding = SessionSandboxBinding(
             sandbox_id=sandbox_id,
@@ -120,6 +206,16 @@ class SessionSandboxManager:
         )
         with self._lock:
             self._bindings[session_id] = binding
+            size = len(self._bindings)
+        logger.info(
+            "沙箱创建并绑定完成 session_id=%s sandbox_id=%s TTL秒=%s "
+            "耗时毫秒=%.1f 当前映射数=%s",
+            session_id,
+            sandbox_id,
+            ttl,
+            (time.monotonic() - started) * 1000,
+            size,
+        )
         return binding
 
     def refresh_busy_near_expiry(self) -> None:
@@ -129,20 +225,44 @@ class SessionSandboxManager:
 
         margin = Config.SANDBOX_KEEPALIVE_MARGIN_SECONDS
         now = time.monotonic()
-        candidates: list[tuple[str, str]] = []
+        candidates: list[tuple[str, str, float, int]] = []
         with self._lock:
             for sid, binding in self._bindings.items():
                 remaining = binding.expires_at - now
                 if binding.active_count > 0 and remaining <= margin:
-                    candidates.append((sid, binding.sandbox_id))
+                    candidates.append(
+                        (sid, binding.sandbox_id, remaining, binding.active_count)
+                    )
+
+        if not candidates:
+            logger.debug(
+                "保活扫描：无需续期 当前映射数=%s 续期阈值秒=%s",
+                len(self._bindings),
+                margin,
+            )
+            return
 
         duration = min(int(Config.SANDBOX_REFRESH_DURATION), 1800)
-        for sid, sandbox_id in candidates:
+        logger.info(
+            "保活扫描：发现待续期沙箱 数量=%s 续期秒数=%s",
+            len(candidates),
+            duration,
+        )
+        for sid, sandbox_id, remaining, active in candidates:
+            logger.info(
+                "开始续期沙箱 session_id=%s sandbox_id=%s "
+                "剩余TTL秒=%.1f 进行中任务数=%s 续期秒数=%s",
+                sid,
+                sandbox_id,
+                remaining,
+                active,
+                duration,
+            )
             try:
                 refresh_sandbox(sandbox_id, duration=duration)
             except SandboxLifecycleError as exc:
                 logger.warning(
-                    "keepalive refresh failed session=%s sandbox=%s: %s",
+                    "续期沙箱失败 session_id=%s sandbox_id=%s 错误=%s",
                     sid,
                     sandbox_id,
                     exc,
@@ -151,10 +271,16 @@ class SessionSandboxManager:
             with self._lock:
                 binding = self._bindings.get(sid)
                 if binding is None or binding.sandbox_id != sandbox_id:
+                    logger.warning(
+                        "续期成功但映射已变化，忽略本地TTL更新 "
+                        "session_id=%s sandbox_id=%s",
+                        sid,
+                        sandbox_id,
+                    )
                     continue
                 binding.expires_at = time.monotonic() + duration
             logger.info(
-                "refreshed sandbox session=%s sandbox=%s duration=%ss",
+                "续期沙箱成功 session_id=%s sandbox_id=%s 续期秒数=%s",
                 sid,
                 sandbox_id,
                 duration,
@@ -162,8 +288,10 @@ class SessionSandboxManager:
 
     def start_keepalive(self) -> None:
         if Config.SANDBOX_DOCKER_CONTAINER:
+            logger.info("保活线程未启动（Docker模式无需保活）")
             return
         if self._keeper_thread is not None and self._keeper_thread.is_alive():
+            logger.info("保活线程已在运行")
             return
         self._keeper_stop.clear()
         self._keeper_thread = threading.Thread(
@@ -173,17 +301,26 @@ class SessionSandboxManager:
         )
         self._keeper_thread.start()
         atexit.register(self.stop_keepalive)
+        logger.info(
+            "保活线程已启动 扫描间隔秒=%s 续期阈值秒=%s 续期秒数=%s",
+            Config.SANDBOX_KEEPALIVE_INTERVAL_SECONDS,
+            Config.SANDBOX_KEEPALIVE_MARGIN_SECONDS,
+            Config.SANDBOX_REFRESH_DURATION,
+        )
 
     def stop_keepalive(self) -> None:
+        logger.info("保活线程正在停止")
         self._keeper_stop.set()
 
     def _keepalive_loop(self) -> None:
         interval = max(1.0, Config.SANDBOX_KEEPALIVE_INTERVAL_SECONDS)
+        logger.info("保活循环进入 扫描间隔秒=%s", interval)
         while not self._keeper_stop.wait(interval):
             try:
                 self.refresh_busy_near_expiry()
             except Exception:
-                logger.exception("sandbox keepalive loop error")
+                logger.exception("保活循环发生异常")
+        logger.info("保活循环已退出")
 
 
 # 进程级单例，生命周期与 TaskStore 一致

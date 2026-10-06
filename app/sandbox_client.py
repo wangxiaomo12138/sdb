@@ -12,6 +12,7 @@ import httpx
 from agent_sandbox import Sandbox
 
 from app.config import Config
+from app.logging_utils import preview
 from app.sandbox_lifecycle import SandboxLifecycleError
 from app.session_sandbox import SessionSandboxBinding, session_sandbox_manager
 
@@ -63,10 +64,19 @@ def _build_opencode_command(
     if opencode_session_id:
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
     # 沙箱内 OpenCode 1.x 用 --dangerously-skip-permissions 自动批准，不是新版 --auto
-    return (
+    command = (
         "opencode run --dangerously-skip-permissions --format json "
         f"{session_flag}{model_flag}{quoted}"
     )
+    logger.info(
+        "已构建OpenCode命令 模型=%s opencode_session_id=%s 问题=%s "
+        "命令预览=%s",
+        Config.OPENCODE_MODEL or "(default)",
+        opencode_session_id or "(new)",
+        preview(query),
+        preview(command, 300),
+    )
+    return command
 
 
 def _iter_ndjson_lines(chunks: Iterable[str]) -> Generator[str, None, None]:
@@ -93,25 +103,35 @@ def _parse_opencode_events(
     last_text = ""
     saw_json = False
     raw_fallback: list[str] = []
+    json_lines = 0
+    delta_events = 0
 
     for line in lines:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             raw_fallback.append(line)
+            logger.debug("OpenCode非JSON行 内容=%s", preview(line, 300))
             continue
 
         if not isinstance(event, dict):
             continue
         saw_json = True
+        json_lines += 1
 
         session_id = event.get("sessionID") or event.get("sessionId")
         if isinstance(session_id, str) and session_id:
+            logger.info("OpenCode事件 类型=会话 opencode_session_id=%s", session_id)
             yield {"type": "session", "opencode_session_id": session_id}
 
         etype = event.get("type")
         if etype in {"session.error", "error"}:
             err = event.get("error") or event.get("message") or event
+            logger.warning(
+                "OpenCode事件 类型=错误 消息=%s 原始=%s",
+                preview(err, 500),
+                preview(event, 500),
+            )
             yield {"type": "error", "message": _clean_output(str(err))}
             return
 
@@ -127,10 +147,23 @@ def _parse_opencode_events(
             last_text = text
             if delta:
                 answer_parts.append(delta)
+                delta_events += 1
+                if delta_events == 1 or delta_events % 20 == 0:
+                    logger.info(
+                        "OpenCode增量进度 事件数=%s 回复字符数=%s 最近片段=%s",
+                        delta_events,
+                        sum(len(p) for p in answer_parts),
+                        preview(delta, 80),
+                    )
                 yield {"type": "delta", "text": delta}
 
     if not saw_json:
         joined = _clean_output("\n".join(raw_fallback))
+        logger.warning(
+            "OpenCode未产出JSON事件 原始行数=%s 预览=%s",
+            len(raw_fallback),
+            preview(joined, 500),
+        )
         if joined:
             if _PROVIDER_ERROR_RE.search(joined):
                 yield {"type": "error", "message": f"opencode failed: {joined}"}
@@ -141,12 +174,22 @@ def _parse_opencode_events(
     answer = "".join(answer_parts)
     if not answer and saw_json:
         # 部分续聊会话可能写库成功但没有 text 事件
+        logger.warning(
+            "OpenCode无文本事件 JSON行数=%s", json_lines
+        )
         yield {
             "type": "error",
             "message": "opencode returned no text events",
         }
         return
 
+    logger.info(
+        "OpenCode解析完成 JSON行数=%s 增量事件数=%s 回复字符数=%s 回复=%s",
+        json_lines,
+        delta_events,
+        len(answer),
+        preview(answer),
+    )
     yield {"type": "done", "answer": answer}
 
 
@@ -166,6 +209,13 @@ def _stream_via_docker(
         "-lc",
         command,
     ]
+    logger.info(
+        "Docker执行开始 容器=%s 超时秒=%s 命令=%s",
+        container,
+        timeout,
+        preview(command, 300),
+    )
+    started = time.monotonic()
     try:
         proc = subprocess.Popen(
             cmd,
@@ -181,13 +231,27 @@ def _stream_via_docker(
 
     assert proc.stdout is not None
     deadline = time.monotonic() + timeout
+    line_count = 0
     try:
         while True:
             if time.monotonic() > deadline:
                 proc.kill()
+                logger.error(
+                    "Docker执行超时 容器=%s 超时秒=%s 已输出行数=%s",
+                    container,
+                    timeout,
+                    line_count,
+                )
                 raise OpenCodeError(f"opencode timed out after {timeout}s")
             line = proc.stdout.readline()
             if line:
+                line_count += 1
+                if line_count == 1 or line_count % 50 == 0:
+                    logger.debug(
+                        "Docker标准输出 行数=%s 预览=%s",
+                        line_count,
+                        preview(line, 200),
+                    )
                 yield line
                 continue
             if proc.poll() is not None:
@@ -196,11 +260,25 @@ def _stream_via_docker(
         remaining = proc.stdout.read()
         if remaining:
             yield remaining
+        elapsed_ms = (time.monotonic() - started) * 1000
         if proc.returncode not in (0, None) and proc.returncode != 0:
             # 退出码非 0 时 stdout 仍可能含 JSON，交给解析器判断
-            logger.warning("docker opencode exit_code=%s", proc.returncode)
+            logger.warning(
+                "Docker中OpenCode非零退出 退出码=%s 行数=%s 耗时毫秒=%.1f",
+                proc.returncode,
+                line_count,
+                elapsed_ms,
+            )
+        else:
+            logger.info(
+                "Docker执行结束 退出码=%s 行数=%s 耗时毫秒=%.1f",
+                proc.returncode,
+                line_count,
+                elapsed_ms,
+            )
     finally:
         if proc.poll() is None:
+            logger.warning("Docker进程仍在运行，强制结束 pid=%s", proc.pid)
             proc.kill()
 
 
@@ -221,16 +299,35 @@ def _stream_via_api_sse(
         "async_mode": False,
         "truncate": False,
     }
+    logger.info(
+        "沙箱SSE执行开始 地址=%s sandbox_id=%s 超时秒=%s 命令=%s",
+        url,
+        sandbox_id,
+        timeout,
+        preview(command, 300),
+    )
+    started = time.monotonic()
     with httpx.Client(timeout=httpx.Timeout(timeout + 30.0)) as client:
         with client.stream("POST", url, headers=headers, json=body) as resp:
             content_type = (resp.headers.get("content-type") or "").lower()
+            logger.info(
+                "沙箱SSE执行响应 HTTP状态码=%s Content-Type=%s",
+                resp.status_code,
+                content_type or "(缺失)",
+            )
             if resp.status_code >= 400:
                 detail = resp.read().decode("utf-8", errors="replace")
+                logger.error(
+                    "沙箱SSE执行HTTP错误 状态码=%s 详情=%s",
+                    resp.status_code,
+                    preview(detail, 500),
+                )
                 raise OpenCodeError(
                     f"sandbox request failed: HTTP {resp.status_code} {detail}"
                 )
 
             if "text/event-stream" in content_type:
+                sse_lines = 0
                 for raw in resp.iter_lines():
                     if not raw:
                         continue
@@ -238,6 +335,7 @@ def _stream_via_api_sse(
                         data = raw[5:].strip()
                         if not data or data == "[DONE]":
                             continue
+                        sse_lines += 1
                         # data 可能是 JSON 包装，也可能是原始 NDJSON 行
                         try:
                             parsed = json.loads(data)
@@ -261,13 +359,25 @@ def _stream_via_api_sse(
                                     yield "\n"
                                 continue
                         yield data + "\n"
+                logger.info(
+                    "沙箱SSE流结束 行数=%s 耗时毫秒=%.1f",
+                    sse_lines,
+                    (time.monotonic() - started) * 1000,
+                )
                 return
 
             # 非 SSE 的 JSON 响应：取出 output 再按行产出
+            logger.info(
+                "沙箱返回非SSE的JSON，改为一次性解析 sandbox_id=%s",
+                sandbox_id,
+            )
             payload = resp.read()
             try:
                 result = json.loads(payload)
             except json.JSONDecodeError as exc:
+                logger.error(
+                    "沙箱响应不是JSON 预览=%s", preview(payload, 300)
+                )
                 raise OpenCodeError(
                     f"sandbox response not JSON: {payload[:200]!r}"
                 ) from exc
@@ -280,6 +390,15 @@ def _stream_via_api_sse(
             if isinstance(data, dict):
                 output = data.get("output") or ""
                 exit_code = data.get("exit_code")
+            logger.info(
+                "沙箱同步JSON结果 成功=%s 退出码=%s 输出字符数=%s "
+                "消息=%s 耗时毫秒=%.1f",
+                success,
+                exit_code,
+                len(output or ""),
+                preview(message),
+                (time.monotonic() - started) * 1000,
+            )
             if success is False or (exit_code is not None and exit_code != 0):
                 detail = _clean_output(output or message or f"exit_code={exit_code}")
                 raise OpenCodeError(f"opencode failed: {detail}")
@@ -291,6 +410,13 @@ def _stream_via_api_async_poll(
     command: str, timeout: float, sandbox_id: str
 ) -> Generator[str, None, None]:
     """兜底：异步执行 shell，再 view 轮询增量 stdout。"""
+    logger.info(
+        "沙箱异步轮询开始 sandbox_id=%s 超时秒=%s 命令=%s",
+        sandbox_id,
+        timeout,
+        preview(command, 300),
+    )
+    started = time.monotonic()
     client = _build_client(timeout=timeout, sandbox_id=sandbox_id)
     try:
         result = client.shell.exec_command(
@@ -301,6 +427,7 @@ def _stream_via_api_async_poll(
             truncate=False,
         )
     except Exception as exc:
+        logger.error("沙箱异步执行失败 错误=%s", preview(exc, 500))
         raise OpenCodeError(f"sandbox request failed: {exc}") from exc
 
     data = getattr(result, "data", None) or result
@@ -313,6 +440,11 @@ def _stream_via_api_async_poll(
 
     # 异步执行未返回 session 时，退回一次同步 exec
     if not shell_id:
+        logger.warning(
+            "沙箱异步执行未返回shell会话，回退同步执行 "
+            "sandbox_id=%s",
+            sandbox_id,
+        )
         try:
             sync_result = client.shell.exec_command(
                 command=command,
@@ -321,6 +453,7 @@ def _stream_via_api_async_poll(
                 truncate=False,
             )
         except Exception as exc:
+            logger.error("沙箱同步回退失败 错误=%s", preview(exc, 500))
             raise OpenCodeError(f"sandbox request failed: {exc}") from exc
         sync_data = getattr(sync_result, "data", None)
         output = ""
@@ -330,6 +463,14 @@ def _stream_via_api_async_poll(
             exit_code = getattr(sync_data, "exit_code", None)
         success = getattr(sync_result, "success", True)
         message = getattr(sync_result, "message", None) or ""
+        logger.info(
+            "沙箱同步回退结果 成功=%s 退出码=%s 输出字符数=%s "
+            "耗时毫秒=%.1f",
+            success,
+            exit_code,
+            len(output or ""),
+            (time.monotonic() - started) * 1000,
+        )
         if success is False or (exit_code is not None and exit_code != 0):
             detail = _clean_output(output or message or f"exit_code={exit_code}")
             raise OpenCodeError(f"opencode failed: {detail}")
@@ -337,12 +478,23 @@ def _stream_via_api_async_poll(
             yield output if output.endswith("\n") else output + "\n"
         return
 
+    logger.info(
+        "沙箱异步轮询已取得shell会话 shell_id=%s sandbox_id=%s", shell_id, sandbox_id
+    )
     deadline = time.monotonic() + timeout
     seen = 0
+    polls = 0
     while time.monotonic() < deadline:
+        polls += 1
         try:
             view = client.shell.view(id=str(shell_id))
         except Exception as exc:
+            logger.error(
+                "沙箱查看输出失败 shell_id=%s 轮询次数=%s 错误=%s",
+                shell_id,
+                polls,
+                preview(exc, 300),
+            )
             raise OpenCodeError(f"sandbox view failed: {exc}") from exc
         view_data = getattr(view, "data", None) or view
         console = (
@@ -356,9 +508,28 @@ def _stream_via_api_async_poll(
         if isinstance(console, str) and len(console) > seen:
             chunk = console[seen:]
             seen = len(console)
+            if polls == 1 or polls % 10 == 0:
+                logger.info(
+                    "沙箱轮询进度 shell_id=%s 轮询次数=%s 状态=%s "
+                    "控制台字符数=%s 片段=%s",
+                    shell_id,
+                    polls,
+                    status,
+                    seen,
+                    preview(chunk, 120),
+                )
             yield chunk
         status_l = str(status or "").lower()
         if status_l in {"completed", "exited", "stopped", "idle", "done"}:
+            logger.info(
+                "沙箱轮询完成 shell_id=%s 轮询次数=%s 状态=%s "
+                "控制台字符数=%s 耗时毫秒=%.1f",
+                shell_id,
+                polls,
+                status_l,
+                seen,
+                (time.monotonic() - started) * 1000,
+            )
             return
         # 再短等进程结束
         try:
@@ -383,12 +554,33 @@ def _stream_via_api_async_poll(
                 )
                 if isinstance(console, str) and len(console) > seen:
                     yield console[seen:]
+                logger.info(
+                    "沙箱等待进程结束 shell_id=%s 等待状态=%s "
+                    "轮询次数=%s 耗时毫秒=%.1f",
+                    shell_id,
+                    wait_status,
+                    polls,
+                    (time.monotonic() - started) * 1000,
+                )
                 return
-        except Exception:
+        except Exception as wait_exc:
+            logger.debug(
+                "沙箱等待进程短暂异常 shell_id=%s 错误=%s",
+                shell_id,
+                preview(wait_exc, 200),
+            )
             time.sleep(0.2)
             continue
         time.sleep(0.2)
 
+    logger.error(
+        "沙箱异步轮询超时 shell_id=%s 轮询次数=%s 控制台字符数=%s "
+        "超时秒=%s",
+        shell_id,
+        polls,
+        seen,
+        timeout,
+    )
     raise OpenCodeError(f"opencode timed out after {timeout}s")
 
 
@@ -396,15 +588,21 @@ def _stream_command_lines(
     command: str, timeout: float, sandbox_id: str
 ) -> Generator[str, None, None]:
     if Config.SANDBOX_DOCKER_CONTAINER:
+        logger.info("执行路径=Docker sandbox_id=%s", sandbox_id)
         yield from _stream_via_docker(command, timeout)
         return
 
+    logger.info("执行路径=优先SSE sandbox_id=%s", sandbox_id)
     try:
         yield from _stream_via_api_sse(command, timeout, sandbox_id)
     except OpenCodeError:
         raise
     except Exception as exc:
-        logger.warning("SSE shell exec failed, falling back to poll: %s", exc)
+        logger.warning(
+            "SSE执行失败，回退异步轮询 sandbox_id=%s 错误=%s",
+            sandbox_id,
+            preview(exc, 300),
+        )
         yield from _stream_via_api_async_poll(command, timeout, sandbox_id)
 
 
@@ -419,9 +617,20 @@ def stream_opencode(
     事件类型：delta | session | done | error
     """
     timeout = Config.OPENCODE_TIMEOUT_SECONDS if timeout is None else timeout
+    logger.info(
+        "开始流式执行OpenCode session_id=%s 超时秒=%s 问题=%s",
+        session_id,
+        timeout,
+        preview(query),
+    )
     try:
         binding = session_sandbox_manager.ensure_sandbox(session_id)
     except SandboxLifecycleError as exc:
+        logger.error(
+            "确保沙箱失败 session_id=%s 错误=%s",
+            session_id,
+            preview(exc, 500),
+        )
         yield {"type": "error", "message": str(exc)}
         return
 
@@ -442,6 +651,15 @@ def _stream_opencode_bound(
     command = _build_opencode_command(query, opencode_session_id=opencode_session_id)
     answer = ""
     errored = False
+    started = time.monotonic()
+    logger.info(
+        "已绑定沙箱准备执行 session_id=%s sandbox_id=%s "
+        "opencode_session_id=%s 超时秒=%s",
+        session_id,
+        binding.sandbox_id,
+        opencode_session_id or "(新建)",
+        timeout,
+    )
 
     try:
         lines = _iter_ndjson_lines(
@@ -462,23 +680,58 @@ def _stream_opencode_bound(
                 # 续聊失败则清掉 OpenCode session，下次当新会话
                 if opencode_session_id:
                     session_sandbox_manager.clear_opencode_session_id(session_id)
+                logger.warning(
+                    "流式OpenCode返回错误 session_id=%s sandbox_id=%s "
+                    "耗时毫秒=%.1f 消息=%s",
+                    session_id,
+                    binding.sandbox_id,
+                    (time.monotonic() - started) * 1000,
+                    preview(event.get("message"), 500),
+                )
                 yield event
                 return
             if event["type"] == "done":
                 answer = event.get("answer") or answer
+                logger.info(
+                    "流式OpenCode完成 session_id=%s sandbox_id=%s "
+                    "耗时毫秒=%.1f 回复字符数=%s",
+                    session_id,
+                    binding.sandbox_id,
+                    (time.monotonic() - started) * 1000,
+                    len(answer or ""),
+                )
                 yield event
                 return
     except OpenCodeError as exc:
         if opencode_session_id:
             session_sandbox_manager.clear_opencode_session_id(session_id)
+        logger.warning(
+            "流式OpenCode异常 session_id=%s sandbox_id=%s "
+            "耗时毫秒=%.1f 错误=%s",
+            session_id,
+            binding.sandbox_id,
+            (time.monotonic() - started) * 1000,
+            preview(exc, 500),
+        )
         yield {"type": "error", "message": str(exc)}
         return
     except Exception as exc:
-        logger.exception("stream_opencode unexpected error")
+        logger.exception(
+            "流式OpenCode未预期异常 session_id=%s sandbox_id=%s",
+            session_id,
+            binding.sandbox_id,
+        )
         yield {"type": "error", "message": f"unexpected error: {exc}"}
         return
 
     if not errored:
+        logger.info(
+            "流式OpenCode兜底完成 session_id=%s 回复字符数=%s "
+            "耗时毫秒=%.1f",
+            session_id,
+            len(answer),
+            (time.monotonic() - started) * 1000,
+        )
         yield {"type": "done", "answer": answer}
 
 
@@ -489,13 +742,27 @@ def run_opencode(
     timeout: Optional[float] = None,
 ) -> str:
     """在指定 session 上跑完 OpenCode，返回本轮完整回复文本。"""
+    logger.info(
+        "开始同步执行OpenCode session_id=%s 问题=%s", session_id, preview(query)
+    )
     answer = ""
     for event in stream_opencode(query, session_id=session_id, timeout=timeout):
         if event["type"] == "delta":
             answer += event.get("text") or ""
         elif event["type"] == "done":
-            return event.get("answer") or answer
+            final = event.get("answer") or answer
+            logger.info(
+                "同步OpenCode成功 session_id=%s 回复字符数=%s",
+                session_id,
+                len(final or ""),
+            )
+            return final
         elif event["type"] == "error":
+            logger.warning(
+                "同步OpenCode失败 session_id=%s 错误=%s",
+                session_id,
+                preview(event.get("message"), 500),
+            )
             raise OpenCodeError(event.get("message") or "opencode failed")
     if not answer:
         raise OpenCodeError("opencode returned empty output")
@@ -505,6 +772,11 @@ def run_opencode(
 def check_sandbox_health(timeout: float = 10.0) -> tuple[bool, str]:
     """返回 (ok, detail)。配置了 docker 容器时优先探测容器。"""
     if Config.SANDBOX_DOCKER_CONTAINER:
+        logger.info(
+            "健康探测Docker 容器=%s 超时秒=%s",
+            Config.SANDBOX_DOCKER_CONTAINER,
+            timeout,
+        )
         try:
             completed = subprocess.run(
                 [
@@ -523,23 +795,39 @@ def check_sandbox_health(timeout: float = 10.0) -> tuple[bool, str]:
                 check=False,
             )
             if completed.returncode == 0:
-                return True, f"docker ok opencode={completed.stdout.strip()}"
-            return (
-                False,
+                detail = f"docker ok opencode={completed.stdout.strip()}"
+                logger.info("健康探测Docker成功 详情=%s", detail)
+                return True, detail
+            detail = (
                 completed.stderr.strip()
                 or completed.stdout.strip()
-                or "docker exec failed",
+                or "docker exec failed"
             )
+            logger.warning(
+                "健康探测Docker失败 退出码=%s 详情=%s",
+                completed.returncode,
+                preview(detail, 300),
+            )
+            return False, detail
         except Exception as exc:
+            logger.exception("健康探测Docker发生异常")
             return False, str(exc)
 
     # 无实例 id 只探 base URL；网关强制要求 sandbox-id 时可能失败
+    logger.info(
+        "健康探测API 地址=%s 超时秒=%s",
+        Config.SANDBOX_BASE_URL,
+        timeout,
+    )
     client = _build_client(timeout=timeout, sandbox_id=None)
     try:
         ctx = client.sandbox.get_context()
         home_dir = getattr(ctx, "home_dir", None) or getattr(
             getattr(ctx, "data", None), "home_dir", None
         )
-        return True, f"reachable home_dir={home_dir}"
+        detail = f"reachable home_dir={home_dir}"
+        logger.info("健康探测API成功 详情=%s", detail)
+        return True, detail
     except Exception as exc:
+        logger.warning("健康探测API失败 错误=%s", preview(exc, 300))
         return False, str(exc)

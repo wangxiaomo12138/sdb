@@ -59,8 +59,23 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `OPENCODE_TIMEOUT_SECONDS` | `600` | 单轮超时 |
 | `WORKER_MAX_WORKERS` | `2` | `/api/query` 后台线程数 |
 | `FLASK_HOST` / `FLASK_PORT` | `0.0.0.0` / `5000` | 监听地址 |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `LOG_FILE` | 空 | 可选日志文件路径；空则只打 stdout |
 
 SDK 运行时还会自动注入 `x-livefunction-sandbox-id: <sandboxId>`。
+
+### 远程排查日志
+
+日志为中文说明 + 关键字段（`session_id` / `sandbox_id` / `任务ID` / 耗时），密钥已脱敏，长文本自动截断。隔离网环境建议：
+
+```bash
+# .env
+LOG_LEVEL=INFO
+LOG_FILE=/var/log/sandbox-proxy.log
+```
+
+按一次请求串联排查时，优先搜：`收到流式对话请求` / `异步查询已受理` → `开始确保沙箱可用` → `调用APIG创建沙箱` / `Docker执行开始` / `沙箱SSE执行开始` → `OpenCode` → `完成` / `失败`。
+需要更细粒度（含非 JSON 行、轮询中间态）时把 `LOG_LEVEL=DEBUG`。
 
 ## API
 

@@ -49,3 +49,13 @@ class Config:
     FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
     FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
     FLASK_DEBUG = os.getenv("FLASK_DEBUG", "0") in {"1", "true", "True", "yes"}
+
+    # 日志：级别 + 可选落盘路径（隔离网环境便于远程捞文件）
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    LOG_FILE = os.getenv("LOG_FILE", "").strip()
+
+    @classmethod
+    def runtime_mode(cls) -> str:
+        if cls.SANDBOX_DOCKER_CONTAINER:
+            return "docker"
+        return "apig"
