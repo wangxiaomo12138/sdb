@@ -64,8 +64,19 @@ class Config:
     # verify=false 时跳过证书校验；CA_BUNDLE 非空时优先用作 verify 路径
     SANDBOX_APIG_SSL_VERIFY = _optional_bool("SANDBOX_APIG_SSL_VERIFY", True)
     SANDBOX_APIG_CA_BUNDLE = os.getenv("SANDBOX_APIG_CA_BUNDLE", "").strip()
-    # TLS 版本：空=系统默认；隔离网握手超时可试 1.2
-    SANDBOX_APIG_TLS_VERSION = os.getenv("SANDBOX_APIG_TLS_VERSION", "1.2").strip()
+    # TLS：auto=只设最低1.2不封顶；1.2/1.3=固定版本。Postman 通而 Python 不通时用 auto+compat
+    SANDBOX_APIG_TLS_VERSION = os.getenv("SANDBOX_APIG_TLS_VERSION", "auto").strip()
+    # 放宽密码套件（DEFAULT:@SECLEVEL=0），对齐 Postman 宽松握手
+    SANDBOX_APIG_SSL_COMPAT = _optional_bool("SANDBOX_APIG_SSL_COMPAT", True)
+    # 优先连 IPv4，避免 Python 走 IPv6 导致握手挂起（Postman 常走 IPv4）
+    SANDBOX_APIG_PREFER_IPV4 = _optional_bool("SANDBOX_APIG_PREFER_IPV4", True)
+    # 默认不读取系统 HTTP(S)_PROXY，避免与 Postman 代理环境不一致
+    SANDBOX_APIG_TRUST_ENV = _optional_bool("SANDBOX_APIG_TRUST_ENV", False)
+    # requests（默认，贴近 Postman）| stdlib | httpx；失败会按序互切
+    SANDBOX_APIG_HTTP_BACKEND = (
+        os.getenv("SANDBOX_APIG_HTTP_BACKEND", "requests").strip().lower()
+        or "requests"
+    )
     SANDBOX_APIG_TIMEOUT_SECONDS = float(
         os.getenv("SANDBOX_APIG_TIMEOUT_SECONDS", "120")
     )

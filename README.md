@@ -51,10 +51,14 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_TEMPLATE_ID` | 空 | 创建沙箱必填模板 ID |
 | `SANDBOX_APIG_SSL_VERIFY` | `true` | APIG HTTPS 证书校验；隔离网自签可设 `false` |
 | `SANDBOX_APIG_CA_BUNDLE` | 空 | 企业 CA 证书文件路径；非空时优先生效 |
-| `SANDBOX_APIG_TLS_VERSION` | `1.2` | TLS 版本；握手超时可保持 `1.2` |
+| `SANDBOX_APIG_TLS_VERSION` | `auto` | `auto`/`1.2`/`1.3`；Postman 通而 Python 不通时用 `auto` |
+| `SANDBOX_APIG_SSL_COMPAT` | `true` | 放宽密码套件（`SECLEVEL=0`），贴近 Postman |
+| `SANDBOX_APIG_PREFER_IPV4` | `true` | 优先 IPv4，避免 IPv6 握手挂起 |
+| `SANDBOX_APIG_TRUST_ENV` | `false` | 是否读取系统 `HTTP(S)_PROXY` |
+| `SANDBOX_APIG_HTTP_BACKEND` | `requests` | `requests` / `stdlib` / `httpx`；失败自动互切 |
 | `SANDBOX_APIG_CONNECT_TIMEOUT_SECONDS` | `30` | APIG TCP/TLS 握手超时 |
 | `SANDBOX_APIG_TIMEOUT_SECONDS` | `120` | APIG 整次请求超时 |
-| `SANDBOX_APIG_PROXY` | 空 | 可选 HTTP 代理，如 `http://host:port` |
+| `SANDBOX_APIG_PROXY` | 空 | `requests`/`httpx` 可用；可选 HTTP 代理 |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
 | `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` 数组 |
 | `SANDBOX_X_MOUNTS_SUBPATH` | 空 | 用户空间挂载子路径（可选） |

@@ -46,7 +46,8 @@ def _log_startup_summary() -> None:
             "APIG模式 管理面地址=%s 模板ID=%s 实例超时秒=%s "
             "续期秒数=%s 保活扫描间隔秒=%s 续期阈值秒=%s "
             "就绪等待秒=%s 运行面地址=%s HW_ID=%s HW_APPKEY=%s API_KEY=%s "
-            "X-mounts=%s SSL校验=%s TLS版本=%s 连接超时秒=%s 请求超时秒=%s 代理=%s",
+            "X-mounts=%s SSL校验=%s TLS版本=%s SSL兼容=%s 优先IPv4=%s "
+            "HTTP后端=%s TRUST_ENV=%s 连接超时秒=%s 请求超时秒=%s 代理=%s",
             Config.SANDBOX_APIG_ENDPOINT or "(未配置)",
             Config.SANDBOX_TEMPLATE_ID or "(未配置)",
             Config.SANDBOX_INSTANCE_TIMEOUT,
@@ -60,7 +61,11 @@ def _log_startup_summary() -> None:
             mask_secret(Config.SANDBOX_API_KEY),
             x_mounts if x_mounts is not None else "(未配置)",
             ssl_label,
-            Config.SANDBOX_APIG_TLS_VERSION or "系统默认",
+            Config.SANDBOX_APIG_TLS_VERSION or "auto",
+            Config.SANDBOX_APIG_SSL_COMPAT,
+            Config.SANDBOX_APIG_PREFER_IPV4,
+            Config.SANDBOX_APIG_HTTP_BACKEND,
+            Config.SANDBOX_APIG_TRUST_ENV,
             Config.SANDBOX_APIG_CONNECT_TIMEOUT_SECONDS,
             Config.SANDBOX_APIG_TIMEOUT_SECONDS,
             Config.SANDBOX_APIG_PROXY or "(无)",
