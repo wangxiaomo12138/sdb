@@ -1,4 +1,5 @@
 import os
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -10,6 +11,17 @@ def _optional_int(name: str, default: int | None = None) -> int | None:
     if not raw:
         return default
     return int(raw)
+
+
+def _optional_bool(name: str, default: bool | None = None) -> bool | None:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {raw!r}")
 
 
 class Config:
@@ -40,6 +52,14 @@ class Config:
         os.getenv("SANDBOX_READY_TIMEOUT_SECONDS", "15")
     )
 
+    # 创建沙箱时的用户空间绑定（APIG body.X-mounts）；workspaceId 为空则不传
+    SANDBOX_X_MOUNTS_WORKSPACE_ID = os.getenv(
+        "SANDBOX_X_MOUNTS_WORKSPACE_ID", ""
+    ).strip()
+    SANDBOX_X_MOUNTS_SUBPATH = os.getenv("SANDBOX_X_MOUNTS_SUBPATH", "").strip()
+    SANDBOX_X_MOUNTS_MOUNT_PATH = os.getenv("SANDBOX_X_MOUNTS_MOUNT_PATH", "").strip()
+    SANDBOX_X_MOUNTS_READ_ONLY = _optional_bool("SANDBOX_X_MOUNTS_READ_ONLY")
+
     # OpenCode 模型，格式 provider/model，例如 local/Qwen3.6-35B-A3B-oQ4-mtp
     OPENCODE_MODEL = os.getenv(
         "OPENCODE_MODEL", "local/Qwen3.6-35B-A3B-oQ4-mtp"
@@ -59,3 +79,18 @@ class Config:
         if cls.SANDBOX_DOCKER_CONTAINER:
             return "docker"
         return "apig"
+
+    @classmethod
+    def build_x_mounts(cls) -> Optional[dict[str, Any]]:
+        """组装创建沙箱请求的 X-mounts；未配置 workspaceId 时返回 None。"""
+        workspace_id = cls.SANDBOX_X_MOUNTS_WORKSPACE_ID
+        if not workspace_id:
+            return None
+        mounts: dict[str, Any] = {"workspaceId": workspace_id}
+        if cls.SANDBOX_X_MOUNTS_SUBPATH:
+            mounts["subpath"] = cls.SANDBOX_X_MOUNTS_SUBPATH
+        if cls.SANDBOX_X_MOUNTS_MOUNT_PATH:
+            mounts["mountPath"] = cls.SANDBOX_X_MOUNTS_MOUNT_PATH
+        if cls.SANDBOX_X_MOUNTS_READ_ONLY is not None:
+            mounts["readOnly"] = cls.SANDBOX_X_MOUNTS_READ_ONLY
+        return mounts

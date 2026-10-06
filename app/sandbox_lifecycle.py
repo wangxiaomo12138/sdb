@@ -69,12 +69,18 @@ def create_sandbox(
     if instance_timeout is not None:
         body["timeout"] = instance_timeout
 
+    x_mounts = Config.build_x_mounts()
+    if x_mounts is not None:
+        # 与 APIG 文档字段名一致：X-mounts
+        body["X-mounts"] = x_mounts
+
     url = f"{_apig_base()}/livefunction/sandboxes"
     logger.info(
-        "调用APIG创建沙箱 地址=%s 模板ID=%s 超时秒=%s",
+        "调用APIG创建沙箱 地址=%s 模板ID=%s 超时秒=%s X-mounts=%s",
         url,
         tid,
         instance_timeout,
+        preview(x_mounts) if x_mounts is not None else "(未配置)",
     )
     with log_step(logger, "APIG创建沙箱", template_id=tid):
         try:
