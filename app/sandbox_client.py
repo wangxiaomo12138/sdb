@@ -126,7 +126,7 @@ def _build_opencode_command(
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
     parts = _opencode_env_exports()
     parts.append(
-        f"opencode run --format json {session_flag}{model_flag}{quoted}"
+        f"opencode run --format json --auto {session_flag}{model_flag}{quoted}"
     )
     # 必须单行：AIO 常驻 shell 遇到换行会返回 ErrorObservation（无 exit_code）
     command = "; ".join(parts)

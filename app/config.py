@@ -150,7 +150,7 @@ class Config:
             return None
         item: dict[str, Any] = {"workspaceId": workspace_id}
         if cls.SANDBOX_X_MOUNTS_SUBPATH:
-            item["subpath"] = cls.SANDBOX_X_MOUNTS_SUBPATH
+            item["subPath"] = cls.SANDBOX_X_MOUNTS_SUBPATH
         if cls.SANDBOX_X_MOUNTS_MOUNT_PATH:
             item["mountPath"] = cls.SANDBOX_X_MOUNTS_MOUNT_PATH
         if cls.SANDBOX_X_MOUNTS_READ_ONLY is not None:
