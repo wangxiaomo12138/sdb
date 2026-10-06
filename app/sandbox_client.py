@@ -104,9 +104,10 @@ def _shell_double_quote(value: str) -> str:
 
 
 def _opencode_env_exports() -> list[str]:
-    env_vars = Config.build_env_vars()
-    if not env_vars:
-        return []
+    env_vars = dict(Config.build_env_vars() or {})
+    # 沙箱内 OpenCode 往往较旧，没有 --auto / --dangerously-skip-permissions；
+    # 用 OPENCODE_PERMISSION 让工具/skill 直接 allow，避免非交互 run 自动拒绝。
+    env_vars.setdefault("OPENCODE_PERMISSION", '{"*":"allow"}')
     exports: list[str] = []
     for key, value in env_vars.items():
         if not _ENV_VAR_NAME_RE.fullmatch(key):
@@ -126,7 +127,7 @@ def _build_opencode_command(
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
     parts = _opencode_env_exports()
     parts.append(
-        f"opencode run --format json --auto {session_flag}{model_flag}{quoted}"
+        f"opencode run --format json {session_flag}{model_flag}{quoted}"
     )
     # 必须单行：AIO 常驻 shell 遇到换行会返回 ErrorObservation（无 exit_code）
     command = "; ".join(parts)
