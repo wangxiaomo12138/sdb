@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.config import Config
 from app.logging_utils import preview
 from app.models import TaskStore
-from app.sandbox_client import OpenCodeError, run_opencode
+from app.sandbox_client import OpenCodeError, stream_opencode
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +42,37 @@ class TaskWorker:
         )
         self.store.mark_running(task_id)
         started = time.monotonic()
+        answer = ""
         try:
-            answer = run_opencode(task.query, session_id=task.session_id)
-            elapsed_ms = (time.monotonic() - started) * 1000
-            self.store.mark_succeeded(task_id, answer)
-            logger.info(
-                "任务执行成功 任务ID=%s session_id=%s 耗时毫秒=%.1f 回复=%s",
-                task_id,
-                task.session_id,
-                elapsed_ms,
-                preview(answer),
-            )
+            for event in stream_opencode(task.query, session_id=task.session_id):
+                etype = event.get("type")
+                if etype == "status":
+                    self.store.append_stage(
+                        task_id,
+                        str(event.get("stage") or ""),
+                        str(event.get("message") or ""),
+                    )
+                elif etype == "delta":
+                    answer += event.get("text") or ""
+                elif etype == "done":
+                    final = event.get("answer") or answer
+                    elapsed_ms = (time.monotonic() - started) * 1000
+                    self.store.mark_succeeded(task_id, final)
+                    logger.info(
+                        "任务执行成功 任务ID=%s session_id=%s 耗时毫秒=%.1f 回复=%s",
+                        task_id,
+                        task.session_id,
+                        elapsed_ms,
+                        preview(final),
+                    )
+                    return
+                elif etype == "error":
+                    raise OpenCodeError(event.get("message") or "opencode failed")
+            # 流结束但无 done/error
+            if answer:
+                self.store.mark_succeeded(task_id, answer)
+            else:
+                raise OpenCodeError("opencode returned no result")
         except OpenCodeError as exc:
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.warning(

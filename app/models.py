@@ -5,7 +5,7 @@ import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.logging_utils import preview
 
@@ -26,6 +26,8 @@ class Task:
     error: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     finished_at: Optional[str] = None
+    current_stage: Optional[str] = None
+    stages: List[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -60,6 +62,26 @@ class TaskStore:
     def get(self, task_id: str) -> Optional[Task]:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def append_stage(self, task_id: str, stage: str, message: str) -> None:
+        entry = {
+            "stage": stage,
+            "message": message,
+            "at": _utc_now_iso(),
+        }
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task is None:
+                logger.warning("追加阶段失败：任务不存在 任务ID=%s", task_id)
+                return
+            task.stages.append(entry)
+            task.current_stage = stage
+        logger.info(
+            "任务阶段更新 任务ID=%s stage=%s message=%s",
+            task_id,
+            stage,
+            preview(message, 200),
+        )
 
     def mark_running(self, task_id: str) -> None:
         with self._lock:

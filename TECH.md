@@ -1,6 +1,6 @@
 # 项目技术方案
 
-Flask 代理服务：按业务 `session_id` 拉起/复用第三方沙箱，在沙箱内执行 OpenCode，对外提供 **SSE 流式多轮对话** 与 **异步任务轮询**。
+Flask 代理服务：环境创建与提问分离——先按 `session_id` 拉起/复用沙箱并完成 NAS / OpenCode / skill 初始化，再在沙箱内执行 OpenCode，对外提供 **SSE 环境创建**、**SSE 流式对话** 与 **异步任务轮询**。
 
 对外 HTTP 约定见 [API.md](API.md)。
 
@@ -8,10 +8,12 @@ Flask 代理服务：按业务 `session_id` 拉起/复用第三方沙箱，在�
 
 | 目标 | 做法 |
 |------|------|
+| 环境与提问分离 | `POST /api/sandbox/session` 建环境；chat/query 只在已有 session 上跑 OpenCode |
 | 沙箱按会话复用 | 同一 `session_id` 绑定同一 `sandboxId` |
-| 沙箱保活 | 默认 TTL 900s；仅当该沙箱有执行中任务且即将到期时 refresh |
+| 双 NAS 挂载 | 创建时 `x-mounts` 最多两项：用户数据 + OpenCode 离线包 |
+| 沙箱保活 | 默认 TTL 900s；环境创建或提问执行中（`active_count>0`）且即将到期时 refresh |
 | 多轮对话 | 缓存 OpenCode `sessionID`，后续 `opencode run --session` |
-| 流式输出 | OpenCode `--format json` → 解析 NDJSON → SSE `delta/done/error` |
+| 流式输出 | OpenCode `--format json` → 解析 NDJSON → SSE `status/delta/done/error` |
 | 网关鉴权可配置 | APIG 与 SDK 共用 `X-HW-ID` / `X-HW-APPKEY`；SDK 另带 `x-livefunction-sandbox-id` |
 
 **不在范围内：** 会话持久化（Redis/DB）、多 gunicorn worker 共享状态、沙箱销毁接口、WebSocket。
@@ -36,6 +38,7 @@ flowchart LR
   Exec[SandboxExec]
   OC[OpenCode]
 
+  Client -->|POST /api/sandbox/session SSE| Flask
   Client -->|POST /api/chat SSE| Flask
   Client -->|POST /api/query 轮询| Flask
   Flask --> SessMgr
@@ -43,7 +46,7 @@ flowchart LR
   Flask -->|headers 含 sandboxId| Exec
   Exec -->|opencode run --format json| OC
   OC -->|NDJSON sessionID/text| Flask
-  Flask -->|SSE delta/done| Client
+  Flask -->|SSE status/delta/done/ready| Client
 ```
 
 ## 3. 模块与文件
@@ -53,45 +56,51 @@ run.py                     入口
 app/
   __init__.py              create_app：TaskStore + TaskWorker
   config.py                环境变量
-  routes.py                HTTP：/health /api/chat /api/query /api/tasks
-  models.py                异步任务内存存储
+  routes.py                HTTP：/health /api/sandbox/session /api/chat /api/query /api/tasks
+  models.py                异步任务内存存储（含 stages）
   worker.py                线程池消费 /api/query
   session_sandbox.py       session_id → sandboxId + opencode_session_id
   sandbox_lifecycle.py     APIG create / refresh / wait
+  sandbox_env.py           环境创建编排：挂载后拷贝 OpenCode、下载 skill
   sandbox_client.py        组命令、流式拉 stdout、解析 OpenCode 事件
 ```
 
 | 模块 | 职责 |
 |------|------|
 | `routes` | 入参校验、SSE 封装、任务提交 |
-| `session_sandbox` | 会话级沙箱生命周期入口 `ensure_sandbox` |
-| `sandbox_lifecycle` | 只对接 APIG HTTP |
-| `sandbox_client` | 对接运行面 + OpenCode CLI |
-| `worker` + `models` | 非流式路径：排队 → `run_opencode` → 落库内存 |
+| `session_sandbox` | `create_session_env` / `get_active`；保活 `active_count` |
+| `sandbox_env` | SSE 环境创建：建沙箱、OpenCode 拷贝、skill 下载 |
+| `sandbox_lifecycle` | 只对接 APIG HTTP（含 `x-mounts`） |
+| `sandbox_client` | 对接运行面 + OpenCode CLI；提问路径 require-existing |
+| `worker` + `models` | 非流式路径：排队 → `stream_opencode` → stages + answer |
 
 ## 4. 主流程
 
-### 4.1 SSE 对话（推荐）
+### 4.1 环境创建（须先于提问）
+
+1. `POST /api/sandbox/session`（可选 `session_id`、`skill_file`）
+2. `stream_create_sandbox_env` → `create_session_env`（无有效绑定则 APIG create，带双 NAS）
+3. `begin_task` → 拷贝 OpenCode 离线包（幂等）→ 可选下载/解压 skill → `end_task`
+4. SSE：`status`… → `ready`（含 `session_id`）
+
+### 4.2 SSE 对话（推荐）
 
 1. `POST /api/chat` 校验 `session_id`、`query`
-2. `stream_opencode` → `ensure_sandbox(session_id)`（标记 `active_count+1`，结束时 `-1`）
-   - 无绑定或已过期：APIG create，starting 时短等（不 refresh）
-   - 有绑定且未过期：直接复用
-   - 后台线程：`active_count>0` 且剩余 TTL ≤ 120s 才 refresh
-3. 组装 `opencode run --format json [-m model] [--session oc_id] query`
-4. 运行面拉 stdout（优先 SSE，失败则 async+view 轮询；docker 则 Popen）
+2. `stream_opencode` → `get_active(session_id)`；不存在/过期则 `error`（**不**自动创建）
+3. 存在则 `begin_task` → `opencode run --format json` → `end_task`
+4. 后台线程：`active_count>0` 且剩余 TTL ≤ 120s 才 refresh
 5. 解析 JSON 行：抽出 `sessionID` 写回 manager；`text` 转增量 `delta`
-6. Flask 把事件写成 `data: {...}\n\n`
+6. Flask 把事件写成 `data: {...}\n\n`（含轻量 `status`）
 
-### 4.2 异步轮询
+### 4.3 异步轮询
 
-`POST /api/query` 写入 `TaskStore` 并 `202`；`TaskWorker` 调同一套 `run_opencode`（内部消费 `stream_opencode`，只取最终 `answer`）。`GET /api/tasks/<id>` 读内存任务。
+`POST /api/query` 写入 `TaskStore` 并 `202`；`TaskWorker` 消费 `stream_opencode`：`status` 写入 `stages`/`current_stage`，`done` 落 `answer`。`GET /api/tasks/<id>` 读内存任务。
 
-### 4.3 两种 Session ID
+### 4.4 两种 Session ID
 
 | ID | 谁产生 | 作用 |
 |----|--------|------|
-| 业务 `session_id` | 客户端 | 绑定沙箱 + 多轮 |
+| 业务 `session_id` | 客户端或环境创建接口 | 绑定沙箱 + 多轮 |
 | OpenCode `sessionID`（如 `ses_...`） | OpenCode JSON 事件 | `--session` 续聊 |
 
 二者不要混用。OpenCode ID 不对客户端暴露（SSE 的 `session` 事件只在服务端消费，不转发）。
@@ -150,16 +159,14 @@ def chat():
     )
 ```
 
-`stream_with_context` 保证生成器在请求上下文里跑。`X-Accel-Buffering: no` 避免前置代理把 SSE 攒成一块再吐。对外只发 `delta` / `done` / `error`（内部 `session` 事件在 `stream_opencode` 里被吃掉）。
+`stream_with_context` 保证生成器在请求上下文里跑。`X-Accel-Buffering: no` 避免前置代理把 SSE 攒成一块再吐。环境接口对外发 `status` / `ready` / `error`；提问接口对外发 `status` / `delta` / `done` / `error`（内部 `session` 事件在 `stream_opencode` 里被吃掉）。
 
-### 6.3 按 session 拿沙箱（过期重建，忙时续期）
+### 6.3 按 session 拿沙箱（环境创建 vs 提问）
 
-`ensure_sandbox` **不再每次 refresh**。本地记录 `expires_at`（创建 TTL 默认 900s）：
+- **环境创建**走 `create_session_env`：未过期复用；过期/无绑定则 `create_and_wait`（带双 NAS `x-mounts`）。
+- **提问**走 `get_active`：仅返回未过期绑定，否则失败，由客户端重新调环境创建接口。
 
-- 未过期：直接复用
-- 已过期 / 无绑定：`create_and_wait` 新建（OpenCode 会话丢失）
-
-执行期间 `stream_opencode` 用 `begin_task` / `end_task` 维护 `active_count`。后台线程每隔 `SANDBOX_KEEPALIVE_INTERVAL_SECONDS` 扫描：
+本地记录 `expires_at`（创建 TTL 默认 900s）。环境创建与提问执行期间均用 `begin_task` / `end_task` 维护 `active_count`。后台线程每隔 `SANDBOX_KEEPALIVE_INTERVAL_SECONDS` 扫描：
 
 ```
 有执行中任务（active_count > 0）且 剩余 TTL ≤ SANDBOX_KEEPALIVE_MARGIN_SECONDS
@@ -195,31 +202,22 @@ def _build_opencode_command(query: str, *, opencode_session_id: Optional[str] = 
 - `--session`：仅当 manager 里已有 OpenCode ID（第二轮起）。
 - `shlex.quote`：防止 query 注入 shell。
 
-### 6.6 主编排：`stream_opencode`
+### 6.6 主编排：`stream_opencode` / `stream_create_sandbox_env`
 
-```411:432:app/sandbox_client.py
-def stream_opencode(query, *, session_id, timeout=None):
-    binding = session_sandbox_manager.ensure_sandbox(session_id)
-    session_sandbox_manager.begin_task(session_id)
-    try:
-        yield from _stream_opencode_bound(...)
-    finally:
-        session_sandbox_manager.end_task(session_id)
-```
-    for event in _parse_opencode_events(lines):
-        if event["type"] == "session":
-            session_sandbox_manager.set_opencode_session_id(...)  # 缓存续聊 ID，不发给客户端
-        elif event["type"] == "delta":
-            yield event
-        elif event["type"] == "error":
-            # 本轮是续聊失败则清掉 oc session，下次当首轮
-            clear_opencode_session_id(...)
-            yield event
-        elif event["type"] == "done":
-            yield event
-```
+提问路径（`sandbox_client.stream_opencode`）：
 
-`run_opencode` 是同一生成器的同步封装：拼 `delta`，遇 `done` 返回，遇 `error` 抛 `OpenCodeError`。`/api/query` 的 worker 走这条路径。
+1. yield `status`（request_received / checking_sandbox）
+2. `get_active`；失败则 `error`
+3. yield `processing` → `begin_task` → `_stream_opencode_bound` → `end_task`
+4. 内部 `session` 事件只写 manager，不转发客户端
+
+环境路径（`sandbox_env.stream_create_sandbox_env`）：
+
+1. yield 环境准备各 `status` 节点
+2. `create_session_env` + OpenCode 拷贝 + 可选 skill
+3. yield `ready`（含 `session_id`）
+
+`/api/query` 的 worker 直接消费 `stream_opencode`：把 `status` 记入 Task.`stages`，`done` 写 `answer`。
 
 ### 6.7 解析增量文本
 
@@ -250,14 +248,7 @@ SSE 路径里 `OpenCodeError` 不吞掉（HTTP 4xx 等直接失败）；其它�
 
 ### 6.9 异步任务
 
-```26:34:app/worker.py
-        self.store.mark_running(task_id)
-        try:
-            answer = run_opencode(task.query, session_id=task.session_id)
-            self.store.mark_succeeded(task_id, answer)
-```
-
-与 SSE **共用** `ensure_sandbox` 和 OpenCode session 缓存：同一 `session_id` 先 `/api/query` 再 `/api/chat`（或反过来）仍是同一沙箱、同一对话。线程池大小 `WORKER_MAX_WORKERS`。
+Worker 消费 `stream_opencode`：`status` → `append_stage`；`done` → `mark_succeeded`。与 chat **共用** `get_active` 与 OpenCode session 缓存：同一 `session_id` 须先经环境创建接口，再 chat/query。线程池大小 `WORKER_MAX_WORKERS`。
 
 ## 7. 失败与恢复
 
@@ -266,7 +257,7 @@ SSE 路径里 `OpenCodeError` 不吞掉（HTTP 4xx 等直接失败）；其它�
 | APIG 配置缺失 / create 失败 | SSE `error`；异步任务 `failed` |
 | 创建后 `stopped`/`error` | `SandboxLifecycleError` |
 | `starting` | 短等后尝试使用，不 refresh 探活 |
-| 空闲到期 | 不续期；下次请求新建沙箱 |
+| 空闲到期 | 不续期；提问失败，需重新调环境创建接口 |
 | 忙且快到期 | 后台 refresh；失败则任务可能在实例销毁后中断 |
 | `--session` 续聊失败 | 清空 `opencode_session_id`，下一轮当新会话 |
 | JSON 无 `text` 事件 | `opencode returned no text events` |

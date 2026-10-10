@@ -4,9 +4,8 @@ import atexit
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 from app.config import Config
 from app.sandbox_lifecycle import (
@@ -18,19 +17,16 @@ from app.sandbox_lifecycle import (
 logger = logging.getLogger(__name__)
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 @dataclass
 class SessionSandboxBinding:
     sandbox_id: str
     opencode_session_id: Optional[str] = None
-    created_at: str = field(default_factory=_utc_now_iso)
     # monotonic 时钟上的预计过期时刻
     expires_at: float = 0.0
-    # 当前正在该沙箱上执行的任务数（含 SSE 与异步 query）
+    # 当前正在该沙箱上执行的任务数（含环境创建 SSE、对话与异步 query）
     active_count: int = 0
+    # OpenCode 离线包是否已从提取路径拷贝到存放路径
+    opencode_initialized: bool = False
 
 
 class SessionSandboxManager:
@@ -43,9 +39,107 @@ class SessionSandboxManager:
         self._keeper_thread: Optional[threading.Thread] = None
         logger.info("会话沙箱管理器已初始化")
 
-    def get(self, session_id: str) -> Optional[SessionSandboxBinding]:
+    def get_active(self, session_id: str) -> Optional[SessionSandboxBinding]:
+        """返回未过期绑定；已过期则清除并返回 None。"""
+        if not session_id or not session_id.strip():
+            return None
+        session_id = session_id.strip()
         with self._lock:
-            return self._bindings.get(session_id)
+            binding = self._bindings.get(session_id)
+            if binding is None:
+                return None
+            if time.monotonic() >= binding.expires_at:
+                logger.info(
+                    "沙箱已过期，清除映射 session_id=%s sandbox_id=%s",
+                    session_id,
+                    binding.sandbox_id,
+                )
+                self._bindings.pop(session_id, None)
+                return None
+            return binding
+
+    def create_session_env(
+        self, session_id: str
+    ) -> Tuple[SessionSandboxBinding, bool]:
+        """确保 session 绑定可用沙箱。
+
+        Returns:
+            (binding, created)：created=True 表示本次新建了沙箱实例。
+        """
+        if not session_id or not session_id.strip():
+            raise SandboxLifecycleError("session_id is required")
+
+        session_id = session_id.strip()
+        logger.info("开始创建或复用沙箱环境 session_id=%s", session_id)
+
+        existing = self.get_active(session_id)
+        if existing is not None:
+            remaining = existing.expires_at - time.monotonic()
+            logger.info(
+                "复用未过期沙箱 session_id=%s sandbox_id=%s "
+                "opencode_initialized=%s 进行中任务数=%s 剩余TTL秒=%.1f",
+                session_id,
+                existing.sandbox_id,
+                existing.opencode_initialized,
+                existing.active_count,
+                remaining,
+            )
+            return existing, False
+
+        if Config.SANDBOX_DOCKER_CONTAINER:
+            with self._lock:
+                # get_active 已清过期；此处仍可能并发写入
+                binding = self._bindings.get(session_id)
+                if binding is not None and time.monotonic() < binding.expires_at:
+                    return binding, False
+                binding = SessionSandboxBinding(
+                    sandbox_id=f"docker:{session_id}",
+                    expires_at=time.monotonic() + 24 * 3600,
+                )
+                self._bindings[session_id] = binding
+            logger.info(
+                "Docker模式新建会话映射 session_id=%s sandbox_id=%s 容器名=%s",
+                session_id,
+                binding.sandbox_id,
+                Config.SANDBOX_DOCKER_CONTAINER,
+            )
+            return binding, True
+
+        started = time.monotonic()
+        sandbox_id, ttl = create_and_wait()
+        binding = SessionSandboxBinding(
+            sandbox_id=sandbox_id,
+            expires_at=time.monotonic() + max(ttl, 1),
+        )
+        with self._lock:
+            self._bindings[session_id] = binding
+            size = len(self._bindings)
+        logger.info(
+            "沙箱创建并绑定完成 session_id=%s sandbox_id=%s TTL秒=%s "
+            "耗时毫秒=%.1f 当前映射数=%s",
+            session_id,
+            sandbox_id,
+            ttl,
+            (time.monotonic() - started) * 1000,
+            size,
+        )
+        return binding, True
+
+    def mark_opencode_initialized(self, session_id: str) -> None:
+        with self._lock:
+            binding = self._bindings.get(session_id)
+            if binding is None:
+                logger.warning(
+                    "标记OpenCode已初始化跳过：找不到会话映射 session_id=%s",
+                    session_id,
+                )
+                return
+            binding.opencode_initialized = True
+        logger.info(
+            "已标记OpenCode离线包初始化完成 session_id=%s sandbox_id=%s",
+            session_id,
+            binding.sandbox_id,
+        )
 
     def set_opencode_session_id(
         self, session_id: str, opencode_session_id: str
@@ -83,16 +177,6 @@ class SessionSandboxManager:
                 session_id,
                 binding.sandbox_id,
                 old,
-            )
-
-    def drop(self, session_id: str) -> None:
-        with self._lock:
-            binding = self._bindings.pop(session_id, None)
-        if binding is not None:
-            logger.info(
-                "已删除会话沙箱映射 session_id=%s sandbox_id=%s",
-                session_id,
-                binding.sandbox_id,
             )
 
     def begin_task(self, session_id: str) -> None:
@@ -133,90 +217,6 @@ class SessionSandboxManager:
             active,
             remaining,
         )
-
-    def ensure_sandbox(self, session_id: str) -> SessionSandboxBinding:
-        """确保 session_id 已绑定未过期沙箱。空闲超时后下次请求再创建。
-
-        Docker 模式跳过 APIG，使用合成的 sandbox_id。
-        """
-        if not session_id or not session_id.strip():
-            raise SandboxLifecycleError("session_id is required")
-
-        session_id = session_id.strip()
-        logger.info("开始确保沙箱可用 session_id=%s", session_id)
-
-        if Config.SANDBOX_DOCKER_CONTAINER:
-            with self._lock:
-                binding = self._bindings.get(session_id)
-                if binding is None:
-                    binding = SessionSandboxBinding(
-                        sandbox_id=f"docker:{session_id}",
-                        expires_at=time.monotonic() + 24 * 3600,
-                    )
-                    self._bindings[session_id] = binding
-                    logger.info(
-                        "Docker模式新建会话映射 session_id=%s sandbox_id=%s "
-                        "容器名=%s",
-                        session_id,
-                        binding.sandbox_id,
-                        Config.SANDBOX_DOCKER_CONTAINER,
-                    )
-                else:
-                    logger.info(
-                        "Docker模式复用会话映射 session_id=%s sandbox_id=%s "
-                        "opencode_session_id=%s 进行中任务数=%s",
-                        session_id,
-                        binding.sandbox_id,
-                        binding.opencode_session_id or "(无)",
-                        binding.active_count,
-                    )
-                return binding
-
-        with self._lock:
-            binding = self._bindings.get(session_id)
-            if binding is not None and time.monotonic() < binding.expires_at:
-                remaining = binding.expires_at - time.monotonic()
-                logger.info(
-                    "复用未过期沙箱 session_id=%s sandbox_id=%s "
-                    "opencode_session_id=%s 进行中任务数=%s 剩余TTL秒=%.1f",
-                    session_id,
-                    binding.sandbox_id,
-                    binding.opencode_session_id or "(无)",
-                    binding.active_count,
-                    remaining,
-                )
-                return binding
-            if binding is not None:
-                logger.info(
-                    "沙箱已过期，准备重建 session_id=%s sandbox_id=%s",
-                    session_id,
-                    binding.sandbox_id,
-                )
-                self._bindings.pop(session_id, None)
-            else:
-                logger.info(
-                    "尚无会话映射，准备创建沙箱 session_id=%s", session_id
-                )
-
-        started = time.monotonic()
-        sandbox_id, ttl = create_and_wait()
-        binding = SessionSandboxBinding(
-            sandbox_id=sandbox_id,
-            expires_at=time.monotonic() + max(ttl, 1),
-        )
-        with self._lock:
-            self._bindings[session_id] = binding
-            size = len(self._bindings)
-        logger.info(
-            "沙箱创建并绑定完成 session_id=%s sandbox_id=%s TTL秒=%s "
-            "耗时毫秒=%.1f 当前映射数=%s",
-            session_id,
-            sandbox_id,
-            ttl,
-            (time.monotonic() - started) * 1000,
-            size,
-        )
-        return binding
 
     def refresh_busy_near_expiry(self) -> None:
         """有正在执行的任务，且剩余 TTL 进入安全窗口时，才调用 refresh 续期。"""

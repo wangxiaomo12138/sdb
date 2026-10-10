@@ -5,14 +5,15 @@ Python 3.10 Flask 服务：按 `session_id` 复用第三方沙箱与 OpenCode �
 ## 架构
 
 ```
-Client -> POST /api/chat (SSE) 或 POST /api/query (异步轮询)
+Client -> POST /api/sandbox/session (SSE 建环境)
+       -> POST /api/chat (SSE) 或 POST /api/query (异步轮询)
        -> SessionSandboxManager（session_id -> sandboxId + opencode_session_id）
-       -> APIG create/refresh 沙箱实例
+       -> APIG create/refresh 沙箱实例（仅环境创建路径）
        -> agent-sandbox / docker exec
        -> opencode run --format json [--session ...]
 ```
 
-任务与 session 映射保存在进程内存中，**服务重启后会丢失**。
+任务与 session 映射保存在进程内存中，**服务重启后会丢失**。提问前须先创建环境。
 
 ## 环境要求
 
@@ -61,10 +62,11 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_APIG_PROXY` | 空 | `requests`/`httpx` 可用；可选 HTTP 代理 |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
 | `SANDBOX_ENV_VARS` | 空 | JSON 对象；非空时在执行 `opencode` 前 `export`（如 `{"PATH":"xxx/bin:$PATH"}`） |
-| `SANDBOX_X_MOUNTS_WORKSPACE_ID` | 空 | 用户空间 id；非空时创建沙箱带 `X-mounts` 数组 |
-| `SANDBOX_X_MOUNTS_SUBPATH` | 空 | 用户空间挂载子路径（可选） |
-| `SANDBOX_X_MOUNTS_MOUNT_PATH` | 空 | 沙箱内挂载路径（可选） |
-| `SANDBOX_X_MOUNTS_READ_ONLY` | 空 | `true`/`false`；空则不传该字段 |
+| `SANDBOX_NAS_USER_DATA_WORKSPACE_ID` 等 | 空 | 用户数据 NAS 挂载（workspaceId/subPath/mountPath/readOnly） |
+| `SANDBOX_NAS_OPENCODE_WORKSPACE_ID` 等 | 空 | OpenCode 离线包 NAS 挂载 |
+| `OPENCODE_OFFLINE_EXTRACT_PATH` | 空 | 沙箱内离线包提取/源路径 |
+| `OPENCODE_OFFLINE_STORE_PATH` | 空 | 沙箱内离线包存放路径 |
+| `SKILL_FILE_STORE_PATH` | 空 | 沙箱内 skill 存放目录 |
 | `SANDBOX_REFRESH_DURATION` | `900` | 有任务且快到期时续期时长（秒，硬上限 1800） |
 | `SANDBOX_KEEPALIVE_MARGIN_SECONDS` | `120` | 剩余 TTL 低于该值才考虑 refresh |
 | `SANDBOX_KEEPALIVE_INTERVAL_SECONDS` | `15` | 保活扫描间隔 |
@@ -89,10 +91,22 @@ LOG_LEVEL=INFO
 LOG_FILE=/var/log/sandbox-proxy.log
 ```
 
-按一次请求串联排查时，优先搜：`收到流式对话请求` / `异步查询已受理` → `开始确保沙箱可用` → `调用APIG创建沙箱` / `Docker执行开始` / `沙箱SSE执行开始` → `OpenCode` → `完成` / `失败`。
+按一次请求串联排查时，优先搜：`收到创建沙箱环境请求` → `收到流式对话请求` / `异步查询已受理` → `开始创建或复用沙箱环境` / `提问时沙箱不可用` → `沙箱SSE执行开始` → `OpenCode` → `完成` / `失败`。
 需要更细粒度（含非 JSON 行、轮询中间态）时把 `LOG_LEVEL=DEBUG`。
 
 ## API
+
+完整契约见 [API.md](API.md)。推荐顺序：先建环境，再提问。
+
+### `POST /api/sandbox/session`（SSE 建环境）
+
+```bash
+curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"user-1"}'
+```
+
+结束事件：`{"type":"ready","session_id":"user-1"}`。可选 `skill_file`（HTTP(S) URL）。
 
 ### `POST /api/chat`（推荐，SSE 流式）
 
@@ -102,29 +116,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
   -d '{"session_id":"user-1","query":"用一句话介绍 Python"}'
 ```
 
-同一 `session_id` 再次请求会续聊：
-
-```bash
-curl -N -X POST http://127.0.0.1:5000/api/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1","query":"再举一个代码示例"}'
-```
-
-SSE `data` 为 JSON：
-
-| type | 字段 | 说明 |
-|------|------|------|
-| `delta` | `text` | 助手增量文本 |
-| `done` | `answer` | 本轮完整回复 |
-| `error` | `message` | 失败信息 |
-
-示例：
-
-```
-data: {"type":"delta","text":"Python"}
-data: {"type":"delta","text":" 是一种..."}
-data: {"type":"done","answer":"Python 是一种..."}
-```
+SSE `data` 为 JSON：`status` / `delta` / `done` / `error`。session 未创建或已过期会直接 `error`。
 
 ### `POST /api/query`（异步轮询，非流式）
 
@@ -146,7 +138,7 @@ curl -X POST http://127.0.0.1:5000/api/query \
 curl http://127.0.0.1:5000/api/tasks/<task_id>
 ```
 
-`status`：`pending` | `running` | `succeeded` | `failed`
+`status`：`pending` | `running` | `succeeded` | `failed`；另含 `current_stage` / `stages` 提问进度。
 
 ### `GET /health`
 
@@ -157,8 +149,8 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 ## Session 语义
 
-- 业务 `session_id`：客户端传入，用于绑定沙箱实例与 OpenCode 多轮会话
+- 业务 `session_id`：由环境创建接口生成或客户端传入，绑定沙箱实例与 OpenCode 多轮会话
 - OpenCode `sessionID`：从 `opencode run --format json` 事件中解析并缓存；后续请求自动加 `--session`
 - 同一 `session_id` → 同一沙箱 + 同一 OpenCode 对话
-- 沙箱默认 900s 后过期销毁；**仅当该沙箱上有正在执行的任务，且剩余时间进入安全窗口（默认 120s）时** 才调用 refresh 续期
-- 空闲到期后下次请求会重新创建沙箱（OpenCode 会话不保留）
+- 沙箱默认 900s 后过期销毁；**环境创建或提问执行中**，且剩余时间进入安全窗口（默认 120s）时才 refresh 续期
+- 空闲到期后提问会失败，需重新调用 `/api/sandbox/session`（OpenCode 会话不保留）

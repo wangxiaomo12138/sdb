@@ -57,13 +57,41 @@ class Config:
     # 执行 opencode 时注入的环境变量；JSON 对象，空则不附加 export
     SANDBOX_ENV_VARS = os.getenv("SANDBOX_ENV_VARS", "").strip()
 
-    # 创建沙箱时的用户空间绑定（APIG body.X-mounts）；workspaceId 为空则不传
-    SANDBOX_X_MOUNTS_WORKSPACE_ID = os.getenv(
-        "SANDBOX_X_MOUNTS_WORKSPACE_ID", ""
+    # 创建沙箱时的双 NAS 挂载（APIG body.x-mounts）；各组 workspaceId 为空则跳过该项
+    SANDBOX_NAS_USER_DATA_WORKSPACE_ID = os.getenv(
+        "SANDBOX_NAS_USER_DATA_WORKSPACE_ID", ""
     ).strip()
-    SANDBOX_X_MOUNTS_SUBPATH = os.getenv("SANDBOX_X_MOUNTS_SUBPATH", "").strip()
-    SANDBOX_X_MOUNTS_MOUNT_PATH = os.getenv("SANDBOX_X_MOUNTS_MOUNT_PATH", "").strip()
-    SANDBOX_X_MOUNTS_READ_ONLY = _optional_bool("SANDBOX_X_MOUNTS_READ_ONLY")
+    SANDBOX_NAS_USER_DATA_SUBPATH = os.getenv(
+        "SANDBOX_NAS_USER_DATA_SUBPATH", ""
+    ).strip()
+    SANDBOX_NAS_USER_DATA_MOUNT_PATH = os.getenv(
+        "SANDBOX_NAS_USER_DATA_MOUNT_PATH", ""
+    ).strip()
+    SANDBOX_NAS_USER_DATA_READ_ONLY = _optional_bool(
+        "SANDBOX_NAS_USER_DATA_READ_ONLY"
+    )
+
+    SANDBOX_NAS_OPENCODE_WORKSPACE_ID = os.getenv(
+        "SANDBOX_NAS_OPENCODE_WORKSPACE_ID", ""
+    ).strip()
+    SANDBOX_NAS_OPENCODE_SUBPATH = os.getenv(
+        "SANDBOX_NAS_OPENCODE_SUBPATH", ""
+    ).strip()
+    SANDBOX_NAS_OPENCODE_MOUNT_PATH = os.getenv(
+        "SANDBOX_NAS_OPENCODE_MOUNT_PATH", ""
+    ).strip()
+    SANDBOX_NAS_OPENCODE_READ_ONLY = _optional_bool(
+        "SANDBOX_NAS_OPENCODE_READ_ONLY"
+    )
+
+    # 沙箱内路径：OpenCode 离线包源/目标、skill 存放目录
+    OPENCODE_OFFLINE_EXTRACT_PATH = os.getenv(
+        "OPENCODE_OFFLINE_EXTRACT_PATH", ""
+    ).strip()
+    OPENCODE_OFFLINE_STORE_PATH = os.getenv(
+        "OPENCODE_OFFLINE_STORE_PATH", ""
+    ).strip()
+    SKILL_FILE_STORE_PATH = os.getenv("SKILL_FILE_STORE_PATH", "").strip()
 
     # APIG HTTPS：隔离网自签/内网证书可关校验，或指定 CA 文件
     # verify=false 时跳过证书校验；CA_BUNDLE 非空时优先用作 verify 路径
@@ -143,19 +171,46 @@ class Config:
         return env_vars or None
 
     @classmethod
-    def build_x_mounts(cls) -> Optional[list[dict[str, Any]]]:
-        """组装创建沙箱请求的 X-mounts（对象数组）；未配置 workspaceId 时返回 None。"""
-        workspace_id = cls.SANDBOX_X_MOUNTS_WORKSPACE_ID
+    def _mount_item(
+        cls,
+        *,
+        workspace_id: str,
+        subpath: str,
+        mount_path: str,
+        read_only: bool | None,
+    ) -> Optional[dict[str, Any]]:
         if not workspace_id:
             return None
         item: dict[str, Any] = {"workspaceId": workspace_id}
-        if cls.SANDBOX_X_MOUNTS_SUBPATH:
-            item["subPath"] = cls.SANDBOX_X_MOUNTS_SUBPATH
-        if cls.SANDBOX_X_MOUNTS_MOUNT_PATH:
-            item["mountPath"] = cls.SANDBOX_X_MOUNTS_MOUNT_PATH
-        if cls.SANDBOX_X_MOUNTS_READ_ONLY is not None:
-            item["readOnly"] = cls.SANDBOX_X_MOUNTS_READ_ONLY
-        return [item]
+        if subpath:
+            item["subPath"] = subpath
+        if mount_path:
+            item["mountPath"] = mount_path
+        if read_only is not None:
+            item["readOnly"] = read_only
+        return item
+
+    @classmethod
+    def build_x_mounts(cls) -> Optional[list[dict[str, Any]]]:
+        """组装创建沙箱请求的 x-mounts（最多两项：用户数据 + OpenCode 离线包）。"""
+        mounts: list[dict[str, Any]] = []
+        user_data = cls._mount_item(
+            workspace_id=cls.SANDBOX_NAS_USER_DATA_WORKSPACE_ID,
+            subpath=cls.SANDBOX_NAS_USER_DATA_SUBPATH,
+            mount_path=cls.SANDBOX_NAS_USER_DATA_MOUNT_PATH,
+            read_only=cls.SANDBOX_NAS_USER_DATA_READ_ONLY,
+        )
+        if user_data is not None:
+            mounts.append(user_data)
+        opencode = cls._mount_item(
+            workspace_id=cls.SANDBOX_NAS_OPENCODE_WORKSPACE_ID,
+            subpath=cls.SANDBOX_NAS_OPENCODE_SUBPATH,
+            mount_path=cls.SANDBOX_NAS_OPENCODE_MOUNT_PATH,
+            read_only=cls.SANDBOX_NAS_OPENCODE_READ_ONLY,
+        )
+        if opencode is not None:
+            mounts.append(opencode)
+        return mounts or None
 
     @classmethod
     def apig_ssl_verify(cls) -> bool | str:

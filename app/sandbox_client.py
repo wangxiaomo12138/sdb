@@ -13,7 +13,6 @@ from agent_sandbox import Sandbox
 
 from app.config import Config
 from app.logging_utils import preview
-from app.sandbox_lifecycle import SandboxLifecycleError
 from app.session_sandbox import SessionSandboxBinding, session_sandbox_manager
 
 logger = logging.getLogger(__name__)
@@ -739,15 +738,53 @@ def _stream_command_lines(
         yield from _stream_via_api_async_poll(api_command, timeout, sandbox_id)
 
 
+_CMD_OK_MARKER = "__SANDBOX_CMD_OK__"
+
+
+def run_sandbox_command(
+    command: str,
+    *,
+    sandbox_id: str,
+    timeout: float = 120.0,
+) -> str:
+    """在沙箱内同步执行 shell 命令，失败抛 OpenCodeError。"""
+    wrapped = f"set -e\n{command}\necho {_CMD_OK_MARKER}"
+    logger.info(
+        "沙箱同步命令开始 sandbox_id=%s 超时秒=%s 命令=%s",
+        sandbox_id,
+        timeout,
+        preview(command, 300),
+    )
+    chunks: list[str] = []
+    for chunk in _stream_command_lines(wrapped, timeout, sandbox_id):
+        chunks.append(chunk)
+    output = "".join(chunks)
+    if _CMD_OK_MARKER not in output:
+        detail = _clean_output(output) or "command failed without output"
+        raise OpenCodeError(f"sandbox command failed: {detail}")
+    cleaned = output.replace(_CMD_OK_MARKER, "")
+    logger.info(
+        "沙箱同步命令完成 sandbox_id=%s 输出字符数=%s",
+        sandbox_id,
+        len(cleaned),
+    )
+    return cleaned
+
+
+def status_event(stage: str, message: str) -> dict[str, Any]:
+    return {"type": "status", "stage": stage, "message": message}
+
+
 def stream_opencode(
     query: str,
     *,
     session_id: str,
     timeout: Optional[float] = None,
 ) -> Generator[dict[str, Any], None, None]:
-    """为 session 确保沙箱，执行 --format json 的 opencode，产出对话事件。
+    """在已存在的 session 沙箱上执行 opencode，产出对话事件。
 
-    事件类型：delta | session | done | error
+    事件类型：status | delta | session | done | error
+    沙箱不存在或已过期时直接 error，不会自动创建。
     """
     timeout = Config.OPENCODE_TIMEOUT_SECONDS if timeout is None else timeout
     logger.info(
@@ -756,17 +793,20 @@ def stream_opencode(
         timeout,
         preview(query),
     )
-    try:
-        binding = session_sandbox_manager.ensure_sandbox(session_id)
-    except SandboxLifecycleError as exc:
-        logger.error(
-            "确保沙箱失败 session_id=%s 错误=%s",
-            session_id,
-            preview(exc, 500),
+    yield status_event("request_received", "接收到用户请求")
+    yield status_event("checking_sandbox", "检查沙箱状态")
+
+    binding = session_sandbox_manager.get_active(session_id)
+    if binding is None:
+        msg = (
+            "sandbox session not found or expired; "
+            "create via POST /api/sandbox/session first"
         )
-        yield {"type": "error", "message": str(exc)}
+        logger.error("提问时沙箱不可用 session_id=%s 错误=%s", session_id, msg)
+        yield {"type": "error", "message": msg}
         return
 
+    yield status_event("processing", "正在处理请求")
     session_sandbox_manager.begin_task(session_id)
     try:
         yield from _stream_opencode_bound(query, session_id, binding, timeout)

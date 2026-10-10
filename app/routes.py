@@ -4,12 +4,13 @@ import json
 import logging
 import time
 import uuid
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from app.logging_utils import preview
 from app.sandbox_client import check_sandbox_health, stream_opencode
+from app.sandbox_env import stream_create_sandbox_env, validate_skill_file_url
 
 api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
@@ -43,6 +44,15 @@ def _parse_session_query(
     return session_id.strip(), query.strip()
 
 
+def _parse_optional_session_id(body: dict) -> Optional[str]:
+    session_id = body.get("session_id")
+    if session_id is None or session_id == "":
+        return None
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("session_id must be a non-empty string when provided")
+    return session_id.strip()
+
+
 @api_bp.get("/health")
 def health():
     probe = request.args.get("probe_sandbox", "0") in {"1", "true", "yes"}
@@ -66,6 +76,66 @@ def health():
     return jsonify(payload)
 
 
+@api_bp.post("/api/sandbox/session")
+def create_sandbox_session():
+    """SSE：创建/复用沙箱环境（NAS 挂载、OpenCode 拷贝、可选 skill）。"""
+    req_id = uuid.uuid4().hex[:12]
+    body = request.get_json(silent=True) or {}
+    try:
+        session_id = _parse_optional_session_id(body)
+        skill_file = validate_skill_file_url(body.get("skill_file"))
+    except ValueError as exc:
+        logger.warning(
+            "创建环境参数校验失败 请求ID=%s 错误=%s", req_id, exc
+        )
+        return jsonify({"error": str(exc)}), 400
+
+    logger.info(
+        "收到创建沙箱环境请求 请求ID=%s session_id=%s skill_file=%s 来源IP=%s",
+        req_id,
+        session_id or "(自动生成)",
+        preview(skill_file or "(无)"),
+        request.remote_addr,
+    )
+
+    def generate():
+        started = time.monotonic()
+        final_session: Optional[str] = None
+        try:
+            for event in stream_create_sandbox_env(
+                session_id=session_id,
+                skill_file=skill_file,
+            ):
+                if event.get("type") == "ready":
+                    final_session = event.get("session_id")
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception(
+                "创建沙箱环境异常 请求ID=%s session_id=%s",
+                req_id,
+                session_id,
+            )
+            err = {"type": "error", "message": "unexpected stream error"}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+        finally:
+            logger.info(
+                "创建沙箱环境结束 请求ID=%s session_id=%s 耗时毫秒=%.1f",
+                req_id,
+                final_session or session_id or "(无)",
+                (time.monotonic() - started) * 1000,
+            )
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @api_bp.post("/api/chat")
 def chat():
     """SSE 流式对话。同一 session_id 续接 OpenCode 多轮会话。"""
@@ -86,7 +156,13 @@ def chat():
 
     def generate():
         started = time.monotonic()
-        event_counts = {"delta": 0, "done": 0, "error": 0, "other": 0}
+        event_counts = {
+            "status": 0,
+            "delta": 0,
+            "done": 0,
+            "error": 0,
+            "other": 0,
+        }
         answer_chars = 0
         try:
             for event in stream_opencode(query, session_id=session_id):
@@ -98,14 +174,18 @@ def chat():
                     event_counts[etype] += 1
                 else:
                     event_counts["other"] += 1
-                if etype in {"done", "error"}:
-                    type_label = "完成" if etype == "done" else "错误"
+                if etype in {"done", "error", "status"}:
                     logger.info(
                         "流式对话事件 请求ID=%s session_id=%s 类型=%s 内容=%s",
                         req_id,
                         session_id,
-                        type_label,
-                        preview(event.get("message") or event.get("answer") or ""),
+                        etype,
+                        preview(
+                            event.get("message")
+                            or event.get("answer")
+                            or event.get("stage")
+                            or ""
+                        ),
                     )
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception:
@@ -120,10 +200,11 @@ def chat():
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.info(
                 "流式对话结束 请求ID=%s session_id=%s 耗时毫秒=%.1f "
-                "增量事件数=%s 完成=%s 错误=%s 回复字符数=%s",
+                "状态事件数=%s 增量事件数=%s 完成=%s 错误=%s 回复字符数=%s",
                 req_id,
                 session_id,
                 elapsed_ms,
+                event_counts["status"],
                 event_counts["delta"],
                 event_counts["done"],
                 event_counts["error"],
@@ -179,9 +260,10 @@ def get_task(task_id: str):
         logger.warning("查询任务不存在 任务ID=%s", task_id)
         return jsonify({"error": "task not found"}), 404
     logger.info(
-        "查询任务成功 任务ID=%s session_id=%s 状态=%s",
+        "查询任务成功 任务ID=%s session_id=%s 状态=%s current_stage=%s",
         task.task_id,
         task.session_id,
         task.status,
+        task.current_stage,
     )
     return jsonify(task.to_dict())
