@@ -44,15 +44,6 @@ def _parse_session_query(
     return session_id.strip(), query.strip()
 
 
-def _parse_optional_session_id(body: dict) -> Optional[str]:
-    session_id = body.get("session_id")
-    if session_id is None or session_id == "":
-        return None
-    if not isinstance(session_id, str) or not session_id.strip():
-        raise ValueError("session_id must be a non-empty string when provided")
-    return session_id.strip()
-
-
 @api_bp.get("/health")
 def health():
     probe = request.args.get("probe_sandbox", "0") in {"1", "true", "yes"}
@@ -78,11 +69,10 @@ def health():
 
 @api_bp.post("/api/sandbox/session")
 def create_sandbox_session():
-    """SSE：创建/复用沙箱环境（NAS 挂载、OpenCode 拷贝、可选 skill）。"""
+    """SSE：创建沙箱环境（NAS 挂载、OpenCode 拷贝、可选 skill）；session_id 由服务端返回。"""
     req_id = uuid.uuid4().hex[:12]
     body = request.get_json(silent=True) or {}
     try:
-        session_id = _parse_optional_session_id(body)
         skill_file = validate_skill_file_url(body.get("skill_file"))
     except ValueError as exc:
         logger.warning(
@@ -91,9 +81,8 @@ def create_sandbox_session():
         return jsonify({"error": str(exc)}), 400
 
     logger.info(
-        "收到创建沙箱环境请求 请求ID=%s session_id=%s skill_file=%s 来源IP=%s",
+        "收到创建沙箱环境请求 请求ID=%s skill_file=%s 来源IP=%s",
         req_id,
-        session_id or "(自动生成)",
         preview(skill_file or "(无)"),
         request.remote_addr,
     )
@@ -102,26 +91,19 @@ def create_sandbox_session():
         started = time.monotonic()
         final_session: Optional[str] = None
         try:
-            for event in stream_create_sandbox_env(
-                session_id=session_id,
-                skill_file=skill_file,
-            ):
+            for event in stream_create_sandbox_env(skill_file=skill_file):
                 if event.get("type") == "ready":
                     final_session = event.get("session_id")
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception:
-            logger.exception(
-                "创建沙箱环境异常 请求ID=%s session_id=%s",
-                req_id,
-                session_id,
-            )
+            logger.exception("创建沙箱环境异常 请求ID=%s", req_id)
             err = {"type": "error", "message": "unexpected stream error"}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         finally:
             logger.info(
                 "创建沙箱环境结束 请求ID=%s session_id=%s 耗时毫秒=%.1f",
                 req_id,
-                final_session or session_id or "(无)",
+                final_session or "(无)",
                 (time.monotonic() - started) * 1000,
             )
 

@@ -8,12 +8,12 @@ Base URL 默认：`http://127.0.0.1:5000`（以 `.env` 中 `FLASK_HOST` / `FLASK
 
 | 概念 | 说明 |
 |------|------|
-| `session_id` | 业务会话 ID。先通过环境创建接口绑定沙箱，再用于提问；同一值复用同一沙箱与 OpenCode 多轮对话 |
+| `session_id` | 由 `POST /api/sandbox/session` 的 `ready` 事件返回；后续提问带此 ID，同一值复用同一沙箱与 OpenCode 多轮对话 |
 | OpenCode `sessionID` | 服务端从 `opencode run --format json` 事件中解析并缓存，客户端无需感知 |
 
 - 任务状态与 session→沙箱映射均在**进程内存**中，服务重启后丢失
 - gunicorn 请使用 `-w 1`，避免多 worker 导致任务/session 不一致
-- **推荐顺序**：先 `POST /api/sandbox/session` 拿到/确认 `session_id`，再调用 `/api/chat` 或 `/api/query`
+- **推荐顺序**：先 `POST /api/sandbox/session` 取得返回的 `session_id`，再调用 `/api/chat` 或 `/api/query`
 
 ### 公共错误
 
@@ -86,7 +86,7 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 ### `POST /api/sandbox/session`
 
-创建或复用沙箱：APIG 创建（含双 NAS `x-mounts`）、拷贝 OpenCode 离线包、可选下载 skill。过程以 SSE `status` 推送，结束返回 `session_id`。
+创建沙箱：APIG 创建（含双 NAS `x-mounts`）、拷贝 OpenCode 离线包、可选下载 skill。过程以 SSE `status` 推送；**`session_id` 由服务端生成**，在 `ready` 事件中返回，客户端无需也不应传入。
 
 #### Headers
 
@@ -99,15 +99,15 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 否 | 不传则服务端生成；传入则绑定/复用该会话 |
 | `skill_file` | string | 否 | 可直接 HTTP 下载的 skill 文件或压缩包 URL（如预签名 S3 链接） |
 
 ```json
 {
-  "session_id": "user-1",
   "skill_file": "https://example.com/skills/pack.zip"
 }
 ```
+
+无 skill 时可传空对象 `{}`。
 
 #### 响应
 
@@ -129,8 +129,8 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 |-------|-----------------|
 | `request_received` | 接收到用户请求 |
 | `checking_sandbox` | 检查沙箱状态 |
-| `creating_sandbox` | 拉起沙箱 / 复用已有沙箱 |
-| `init_opencode` | 初始化 opencode 配置（或跳过） |
+| `creating_sandbox` | 拉起沙箱 |
+| `init_opencode` | 初始化 opencode 配置 |
 | `init_skill` | 初始化 skill 配置（或跳过） |
 | `sandbox_ready` | 沙箱初始化完成 |
 
@@ -149,15 +149,17 @@ data: {"type":"status","stage":"init_skill","message":"跳过初始化 skill 配
 
 data: {"type":"status","stage":"sandbox_ready","message":"沙箱初始化完成"}
 
-data: {"type":"ready","session_id":"user-1"}
+data: {"type":"ready","session_id":"a1b2c3d4e5f6..."}
 ```
+
+客户端应保存 `ready.session_id`，供后续 `/api/chat`、`/api/query` 使用。
 
 #### 示例
 
 ```bash
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1"}'
+  -d '{}'
 ```
 
 ---
@@ -181,12 +183,12 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 业务会话 ID（须已创建环境） |
+| `session_id` | string | 是 | 环境创建接口返回的会话 ID |
 | `query` | string | 是 | 本轮用户问题，非空 |
 
 ```json
 {
-  "session_id": "user-1",
+  "session_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python"
 }
 ```
@@ -233,20 +235,21 @@ data: {"type":"error","message":"sandbox session not found or expired; create vi
 #### 多轮示例
 
 ```bash
-# 先创建环境
+# 先创建环境，从 SSE ready 事件取出 session_id
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1"}'
+  -d '{}'
+# 假设得到 session_id=a1b2c3d4e5f6...
 
 # 第一轮
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1","query":"用一句话介绍 Python"}'
+  -d '{"session_id":"a1b2c3d4e5f6...","query":"用一句话介绍 Python"}'
 
 # 第二轮（同一 session_id，续聊）
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1","query":"再给一个代码示例"}'
+  -d '{"session_id":"a1b2c3d4e5f6...","query":"再给一个代码示例"}'
 ```
 
 ---
@@ -269,12 +272,12 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 业务会话 ID（须已创建环境） |
+| `session_id` | string | 是 | 环境创建接口返回的会话 ID |
 | `query` | string | 是 | 用户问题 |
 
 ```json
 {
-  "session_id": "user-1",
+  "session_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python"
 }
 ```
@@ -284,7 +287,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "session_id": "user-1",
+  "session_id": "a1b2c3d4e5f6...",
   "status": "pending"
 }
 ```
@@ -294,7 +297,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 ```bash
 curl -X POST http://127.0.0.1:5000/api/query \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1","query":"用一句话介绍 Python"}'
+  -d '{"session_id":"a1b2c3d4e5f6...","query":"用一句话介绍 Python"}'
 ```
 
 ---
@@ -384,7 +387,7 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 ## 调用建议
 
-1. 先调 **`/api/sandbox/session`** 完成环境准备并拿到 `session_id`
+1. 先调 **`/api/sandbox/session`**，从 `ready` 事件拿到服务端下发的 `session_id`
 2. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**
 3. 只需最终完整答案、可接受轮询：用 **`/api/query` + `/api/tasks/<id>`**
 4. 多轮时客户端稳定复用同一个 `session_id`；沙箱过期后需重新创建环境

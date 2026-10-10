@@ -103,10 +103,10 @@ LOG_FILE=/var/log/sandbox-proxy.log
 ```bash
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1"}'
+  -d '{}'
 ```
 
-结束事件：`{"type":"ready","session_id":"user-1"}`。可选 `skill_file`（HTTP(S) URL）。
+结束事件：`{"type":"ready","session_id":"<服务端生成>"}`。可选 `skill_file`（HTTP(S) URL）。**不要传 `session_id`。**
 
 ### `POST /api/chat`（推荐，SSE 流式）
 
@@ -149,7 +149,7 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 ## Session 语义
 
-- 业务 `session_id`：由环境创建接口生成或客户端传入，绑定沙箱实例与 OpenCode 多轮会话
+- 业务 `session_id`：由环境创建接口在 `ready` 事件中下发，绑定沙箱实例与 OpenCode 多轮会话
 - OpenCode `sessionID`：从 `opencode run --format json` 事件中解析并缓存；后续请求自动加 `--session`
 - 同一 `session_id` → 同一沙箱 + 同一 OpenCode 对话
 - 沙箱默认 900s 后过期销毁；**环境创建或提问执行中**，且剩余时间进入安全窗口（默认 120s）时才 refresh 续期

@@ -78,10 +78,10 @@ app/
 
 ### 4.1 环境创建（须先于提问）
 
-1. `POST /api/sandbox/session`（可选 `session_id`、`skill_file`）
-2. `stream_create_sandbox_env` → `create_session_env`（无有效绑定则 APIG create，带双 NAS）
-3. `begin_task` → 拷贝 OpenCode 离线包（幂等）→ 可选下载/解压 skill → `end_task`
-4. SSE：`status`… → `ready`（含 `session_id`）
+1. `POST /api/sandbox/session`（可选 `skill_file`；**不传** `session_id`）
+2. 服务端生成 `session_id` → `create_session_env`（APIG create，带双 NAS）
+3. `begin_task` → 拷贝 OpenCode 离线包 → 可选下载/解压 skill → `end_task`
+4. SSE：`status`… → `ready`（含服务端下发的 `session_id`）
 
 ### 4.2 SSE 对话（推荐）
 
@@ -100,7 +100,7 @@ app/
 
 | ID | 谁产生 | 作用 |
 |----|--------|------|
-| 业务 `session_id` | 客户端或环境创建接口 | 绑定沙箱 + 多轮 |
+| 业务 `session_id` | 环境创建接口（`ready` 事件） | 绑定沙箱 + 多轮 |
 | OpenCode `sessionID`（如 `ses_...`） | OpenCode JSON 事件 | `--session` 续聊 |
 
 二者不要混用。OpenCode ID 不对客户端暴露（SSE 的 `session` 事件只在服务端消费，不转发）。

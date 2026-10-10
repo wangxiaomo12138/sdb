@@ -117,11 +117,11 @@ fi
 
 def stream_create_sandbox_env(
     *,
-    session_id: Optional[str] = None,
     skill_file: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, None]:
-    """创建/复用沙箱环境：NAS 挂载随 APIG 创建生效，再拷贝 OpenCode、可选下载 skill。
+    """创建沙箱环境：NAS 挂载随 APIG 创建生效，再拷贝 OpenCode、可选下载 skill。
 
+    session_id 由服务端生成，在 ready 事件中返回。
     事件：status | ready | error
     """
     yield _status("request_received", "接收到用户请求")
@@ -132,7 +132,7 @@ def stream_create_sandbox_env(
         yield {"type": "error", "message": str(exc)}
         return
 
-    sid = (session_id or "").strip() or uuid.uuid4().hex
+    sid = uuid.uuid4().hex
     logger.info(
         "开始创建沙箱环境 session_id=%s skill_file=%s",
         sid,
@@ -141,12 +141,9 @@ def stream_create_sandbox_env(
 
     yield _status("checking_sandbox", "检查沙箱状态")
 
-    created = False
     try:
         yield _status("creating_sandbox", "拉起沙箱")
-        binding, created = session_sandbox_manager.create_session_env(sid)
-        if not created:
-            yield _status("creating_sandbox", "复用已有沙箱")
+        binding, _created = session_sandbox_manager.create_session_env(sid)
     except SandboxLifecycleError as exc:
         logger.error(
             "创建沙箱环境失败 session_id=%s 错误=%s", sid, preview(exc, 500)
@@ -156,24 +153,19 @@ def stream_create_sandbox_env(
 
     session_sandbox_manager.begin_task(sid)
     try:
-        # OpenCode 离线包
-        if binding.opencode_initialized:
-            yield _status("init_opencode", "跳过初始化 opencode 配置（已完成）")
-        else:
-            yield _status("init_opencode", "初始化 opencode 配置")
-            try:
-                _copy_opencode_offline(binding.sandbox_id)
-                session_sandbox_manager.mark_opencode_initialized(sid)
-            except OpenCodeError as exc:
-                logger.error(
-                    "OpenCode离线包初始化失败 session_id=%s 错误=%s",
-                    sid,
-                    preview(exc, 500),
-                )
-                yield {"type": "error", "message": str(exc)}
-                return
+        yield _status("init_opencode", "初始化 opencode 配置")
+        try:
+            _copy_opencode_offline(binding.sandbox_id)
+            session_sandbox_manager.mark_opencode_initialized(sid)
+        except OpenCodeError as exc:
+            logger.error(
+                "OpenCode离线包初始化失败 session_id=%s 错误=%s",
+                sid,
+                preview(exc, 500),
+            )
+            yield {"type": "error", "message": str(exc)}
+            return
 
-        # Skill
         if skill_url:
             yield _status("init_skill", "初始化 skill 配置")
             try:
@@ -191,10 +183,9 @@ def stream_create_sandbox_env(
 
         yield _status("sandbox_ready", "沙箱初始化完成")
         logger.info(
-            "沙箱环境就绪 session_id=%s sandbox_id=%s 新建=%s",
+            "沙箱环境就绪 session_id=%s sandbox_id=%s",
             sid,
             binding.sandbox_id,
-            created,
         )
         yield {"type": "ready", "session_id": sid}
     finally:
