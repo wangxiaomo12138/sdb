@@ -99,11 +99,11 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `skill_file` | string | 否 | 可直接 HTTP 下载的 skill 文件或压缩包 URL（如预签名 S3 链接） |
+| `skill_file` | string | 否 | 可直接 HTTP 下载的 skill 文件或压缩包 URL；多个用英文逗号分隔（如预签名 S3 链接） |
 
 ```json
 {
-  "skill_file": "https://example.com/skills/pack.zip"
+  "skill_file": "https://example.com/skills/a.zip,https://example.com/skills/b.zip"
 }
 ```
 

@@ -106,7 +106,7 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -d '{}'
 ```
 
-结束事件：`{"type":"ready","session_id":"<服务端生成>"}`。可选 `skill_file`（HTTP(S) URL）。**不要传 `session_id`。**
+结束事件：`{"type":"ready","session_id":"<服务端生成>"}`。可选 `skill_file`（HTTP(S) URL，多个用英文逗号分隔）。**不要传 `session_id`。**
 
 ### `POST /api/chat`（推荐，SSE 流式）
 

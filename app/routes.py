@@ -10,7 +10,7 @@ from flask import Blueprint, Response, current_app, jsonify, request, stream_wit
 
 from app.logging_utils import preview
 from app.sandbox_client import check_sandbox_health, stream_opencode
-from app.sandbox_env import stream_create_sandbox_env, validate_skill_file_url
+from app.sandbox_env import stream_create_sandbox_env, validate_skill_file_urls
 
 api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
@@ -73,27 +73,52 @@ def create_sandbox_session():
     req_id = uuid.uuid4().hex[:12]
     body = request.get_json(silent=True) or {}
     try:
-        skill_file = validate_skill_file_url(body.get("skill_file"))
+        skill_urls = validate_skill_file_urls(body.get("skill_file"))
     except ValueError as exc:
         logger.warning(
             "创建环境参数校验失败 请求ID=%s 错误=%s", req_id, exc
         )
         return jsonify({"error": str(exc)}), 400
 
+    skill_file_raw = (
+        ",".join(skill_urls) if skill_urls else None
+    )
     logger.info(
-        "收到创建沙箱环境请求 请求ID=%s skill_file=%s 来源IP=%s",
+        "收到创建沙箱环境请求 请求ID=%s skill_file数量=%s skill_file=%s 来源IP=%s",
         req_id,
-        preview(skill_file or "(无)"),
+        len(skill_urls or []),
+        preview(skill_file_raw or "(无)"),
         request.remote_addr,
     )
 
     def generate():
         started = time.monotonic()
         final_session: Optional[str] = None
+        status_count = 0
         try:
-            for event in stream_create_sandbox_env(skill_file=skill_file):
-                if event.get("type") == "ready":
+            for event in stream_create_sandbox_env(skill_file=skill_file_raw):
+                etype = event.get("type")
+                if etype == "ready":
                     final_session = event.get("session_id")
+                    logger.info(
+                        "创建沙箱环境SSE就绪 请求ID=%s session_id=%s",
+                        req_id,
+                        final_session,
+                    )
+                elif etype == "status":
+                    status_count += 1
+                    logger.info(
+                        "创建沙箱环境SSE状态 请求ID=%s stage=%s message=%s",
+                        req_id,
+                        event.get("stage"),
+                        event.get("message"),
+                    )
+                elif etype == "error":
+                    logger.warning(
+                        "创建沙箱环境SSE错误 请求ID=%s message=%s",
+                        req_id,
+                        preview(event.get("message"), 500),
+                    )
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception:
             logger.exception("创建沙箱环境异常 请求ID=%s", req_id)
@@ -101,9 +126,11 @@ def create_sandbox_session():
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         finally:
             logger.info(
-                "创建沙箱环境结束 请求ID=%s session_id=%s 耗时毫秒=%.1f",
+                "创建沙箱环境结束 请求ID=%s session_id=%s 状态事件数=%s "
+                "耗时毫秒=%.1f",
                 req_id,
                 final_session or "(无)",
+                status_count,
                 (time.monotonic() - started) * 1000,
             )
 
