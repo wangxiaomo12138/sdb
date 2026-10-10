@@ -720,20 +720,16 @@ def wait_until_running(
 
 def create_and_wait(
     *,
-    template_id: Optional[str] = None,
     user_data_subpath: Optional[str] = None,
 ) -> tuple[str, int]:
     """创建沙箱并等到可用，返回 (sandboxId, ttl 秒)。"""
     logger.info(
         "开始创建沙箱并等待就绪 template_id=%s user_data_subpath=%s",
-        (template_id or Config.SANDBOX_TEMPLATE_ID or "").strip() or "(未指定)",
+        Config.SANDBOX_TEMPLATE_ID or "(未配置)",
         (user_data_subpath or "").strip() or "(配置默认)",
     )
     started = time.monotonic()
-    data = create_sandbox(
-        template_id=template_id,
-        user_data_subpath=user_data_subpath,
-    )
+    data = create_sandbox(user_data_subpath=user_data_subpath)
     sandbox_id = str(data["sandboxId"])
     status = data.get("status")
     wait_until_running(sandbox_id, initial_status=str(status) if status else None)

@@ -77,7 +77,7 @@ def create_sandbox_session():
     req_id = uuid.uuid4().hex[:12]
     body = request.get_json(silent=True) or {}
     try:
-        template_id, sub_path = validate_create_env_params(body)
+        sub_path = validate_create_env_params(body)
         skill_urls = validate_skill_file_urls(body.get("skill_file"))
     except ValueError as exc:
         logger.warning(
@@ -89,10 +89,9 @@ def create_sandbox_session():
         ",".join(skill_urls) if skill_urls else None
     )
     logger.info(
-        "收到创建沙箱环境请求 请求ID=%s template_id=%s sub_path=%s "
+        "收到创建沙箱环境请求 请求ID=%s sub_path=%s "
         "skill_file数量=%s skill_file=%s 来源IP=%s",
         req_id,
-        template_id,
         sub_path,
         len(skill_urls or []),
         preview(skill_file_raw or "(无)"),
@@ -105,7 +104,6 @@ def create_sandbox_session():
         status_count = 0
         try:
             for event in stream_create_sandbox_env(
-                template_id=template_id,
                 sub_path=sub_path,
                 skill_file=skill_file_raw,
             ):

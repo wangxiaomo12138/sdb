@@ -78,8 +78,8 @@ app/
 
 ### 4.1 环境创建（须先于提问）
 
-1. `POST /api/sandbox/session`（必传 `template_id`、`sub_path`；可选 `skill_file`；**不传** `session_id`）
-2. 服务端生成 `session_id` → `create_session_env`（APIG create：`templateId` + 双 NAS；用户数据 `subPath` 用请求值，OpenCode NAS 用配置）
+1. `POST /api/sandbox/session`（必传 `sub_path`；可选 `skill_file`；**不传** `session_id`）
+2. 服务端生成 `session_id` → `create_session_env`（APIG create：配置中的 `templateId` + 双 NAS；用户数据 `subPath` 用请求值，OpenCode NAS 用配置）
 3. `begin_task` → 拷贝 OpenCode 离线包 → 可选下载/解压 skill → `end_task`
 4. SSE：`status`… → `ready`（含服务端下发的 `session_id`）
 

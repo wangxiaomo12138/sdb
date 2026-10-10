@@ -60,19 +60,12 @@ def validate_skill_file_url(skill_file: Optional[str]) -> Optional[list[str]]:
     return validate_skill_file_urls(skill_file)
 
 
-def validate_create_env_params(
-    body: dict[str, Any],
-) -> tuple[str, str]:
-    """从请求体取出 template_id / sub_path（兼容 camelCase），均必填。"""
-    template_id = body.get("template_id", body.get("templateId"))
+def validate_create_env_params(body: dict[str, Any]) -> str:
+    """从请求体取出用户数据 NAS 的 sub_path（兼容 camelCase），必填。"""
     sub_path = body.get("sub_path", body.get("subPath"))
-    if not isinstance(template_id, str) or not template_id.strip():
-        raise ValueError(
-            "template_id is required and must be a non-empty string"
-        )
     if not isinstance(sub_path, str) or not sub_path.strip():
         raise ValueError("sub_path is required and must be a non-empty string")
-    return template_id.strip(), sub_path.strip()
+    return sub_path.strip()
 
 
 def _copy_opencode_offline(sandbox_id: str) -> None:
@@ -267,14 +260,13 @@ def _download_skill_files(sandbox_id: str, skill_urls: list[str]) -> None:
 
 def stream_create_sandbox_env(
     *,
-    template_id: str,
     sub_path: str,
     skill_file: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, None]:
     """创建沙箱环境：NAS 挂载随 APIG 创建生效，再拷贝 OpenCode、可选下载 skill。
 
-    template_id / sub_path 由调用方传入：前者用于创建模板，后者写入用户数据 NAS
-    的 subPath 以实现用户隔离；OpenCode NAS 仍使用服务端配置。
+    sub_path 由调用方传入，写入用户数据 NAS 的 subPath 以实现用户隔离；
+    沙箱 templateId 与 OpenCode NAS 仍使用服务端配置。
     session_id 由服务端生成，在 ready 事件中返回。
     事件：status | ready | error
     """
@@ -288,10 +280,9 @@ def stream_create_sandbox_env(
         yield {"type": "error", "message": str(exc)}
         return
 
-    tid = (template_id or "").strip()
     user_subpath = (sub_path or "").strip()
-    if not tid or not user_subpath:
-        msg = "template_id and sub_path are required"
+    if not user_subpath:
+        msg = "sub_path is required"
         logger.warning("创建环境参数校验失败 错误=%s", msg)
         yield {"type": "error", "message": msg}
         return
@@ -303,7 +294,7 @@ def stream_create_sandbox_env(
         "skill_file数量=%s skill_file=%s X-mounts=%s "
         "OpenCode提取路径=%s OpenCode存放路径=%s Skill存放路径=%s",
         sid,
-        tid,
+        Config.SANDBOX_TEMPLATE_ID or "(未配置)",
         user_subpath,
         len(skill_urls or []),
         preview(",".join(skill_urls) if skill_urls else "(无)"),
@@ -320,16 +311,14 @@ def stream_create_sandbox_env(
         create_started = time.monotonic()
         binding, created = session_sandbox_manager.create_session_env(
             sid,
-            template_id=tid,
             user_data_subpath=user_subpath,
         )
         logger.info(
             "沙箱实例就绪 session_id=%s sandbox_id=%s 新建=%s "
-            "template_id=%s user_data_subpath=%s 耗时毫秒=%.1f",
+            "user_data_subpath=%s 耗时毫秒=%.1f",
             sid,
             binding.sandbox_id,
             created,
-            tid,
             user_subpath,
             (time.monotonic() - create_started) * 1000,
         )

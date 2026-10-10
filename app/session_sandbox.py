@@ -62,7 +62,6 @@ class SessionSandboxManager:
         self,
         session_id: str,
         *,
-        template_id: Optional[str] = None,
         user_data_subpath: Optional[str] = None,
     ) -> Tuple[SessionSandboxBinding, bool]:
         """确保 session 绑定可用沙箱。
@@ -75,10 +74,8 @@ class SessionSandboxManager:
 
         session_id = session_id.strip()
         logger.info(
-            "开始创建或复用沙箱环境 session_id=%s template_id=%s "
-            "user_data_subpath=%s",
+            "开始创建或复用沙箱环境 session_id=%s user_data_subpath=%s",
             session_id,
-            (template_id or "").strip() or "(配置默认)",
             (user_data_subpath or "").strip() or "(配置默认)",
         )
 
@@ -109,20 +106,16 @@ class SessionSandboxManager:
                 self._bindings[session_id] = binding
             logger.info(
                 "Docker模式新建会话映射 session_id=%s sandbox_id=%s 容器名=%s "
-                "template_id=%s user_data_subpath=%s",
+                "user_data_subpath=%s",
                 session_id,
                 binding.sandbox_id,
                 Config.SANDBOX_DOCKER_CONTAINER,
-                (template_id or "").strip() or "(忽略)",
                 (user_data_subpath or "").strip() or "(忽略)",
             )
             return binding, True
 
         started = time.monotonic()
-        sandbox_id, ttl = create_and_wait(
-            template_id=template_id,
-            user_data_subpath=user_data_subpath,
-        )
+        sandbox_id, ttl = create_and_wait(user_data_subpath=user_data_subpath)
         binding = SessionSandboxBinding(
             sandbox_id=sandbox_id,
             expires_at=time.monotonic() + max(ttl, 1),
@@ -132,11 +125,10 @@ class SessionSandboxManager:
             size = len(self._bindings)
         logger.info(
             "沙箱创建并绑定完成 session_id=%s sandbox_id=%s TTL秒=%s "
-            "template_id=%s user_data_subpath=%s 耗时毫秒=%.1f 当前映射数=%s",
+            "user_data_subpath=%s 耗时毫秒=%.1f 当前映射数=%s",
             session_id,
             sandbox_id,
             ttl,
-            (template_id or "").strip() or "(配置默认)",
             (user_data_subpath or "").strip() or "(配置默认)",
             (time.monotonic() - started) * 1000,
             size,
