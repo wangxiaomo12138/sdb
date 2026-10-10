@@ -103,10 +103,10 @@ LOG_FILE=/var/log/sandbox-proxy.log
 ```bash
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{"template_id":"tpl-xxx","sub_path":"users/u-1001"}'
 ```
 
-结束事件：`{"type":"ready","session_id":"<服务端生成>"}`。可选 `skill_file`（HTTP(S) URL，多个用英文逗号分隔）。**不要传 `session_id`。**
+结束事件：`{"type":"ready","session_id":"<服务端生成>"}`。必传 `template_id`、`sub_path`（用户 NAS 隔离）；可选 `skill_file`（HTTP(S) URL，多个用英文逗号分隔）。**不要传 `session_id`。**
 
 ### `POST /api/chat`（推荐，SSE 流式）
 

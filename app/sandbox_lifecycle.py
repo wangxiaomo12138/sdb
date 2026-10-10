@@ -598,11 +598,12 @@ def create_sandbox(
     *,
     template_id: Optional[str] = None,
     timeout: Optional[int] = None,
+    user_data_subpath: Optional[str] = None,
 ) -> dict[str, Any]:
     """通过 APIG 创建沙箱实例，返回含 sandboxId 的 data 对象。"""
     tid = (template_id or Config.SANDBOX_TEMPLATE_ID or "").strip()
     if not tid:
-        raise SandboxLifecycleError("SANDBOX_TEMPLATE_ID is required")
+        raise SandboxLifecycleError("template_id / SANDBOX_TEMPLATE_ID is required")
 
     body: dict[str, Any] = {"templateId": tid}
     instance_timeout = (
@@ -611,10 +612,16 @@ def create_sandbox(
     if instance_timeout is not None:
         body["timeout"] = instance_timeout
 
-    x_mounts = Config.build_x_mounts()
+    x_mounts = Config.build_x_mounts(user_data_subpath=user_data_subpath)
     if x_mounts is not None:
         # 请求体字段为小写 x-mounts，网关按大小写区分
         body["x-mounts"] = x_mounts
+    logger.info(
+        "组装创建沙箱参数 template_id=%s user_data_subpath=%s X-mounts=%s",
+        tid,
+        (user_data_subpath or "").strip() or "(配置默认)",
+        x_mounts if x_mounts is not None else "(未配置)",
+    )
 
     url = f"{_apig_base()}/livefunction/sandboxes"
     request_dump = json.dumps(
@@ -711,11 +718,22 @@ def wait_until_running(
     return sandbox_id
 
 
-def create_and_wait() -> tuple[str, int]:
+def create_and_wait(
+    *,
+    template_id: Optional[str] = None,
+    user_data_subpath: Optional[str] = None,
+) -> tuple[str, int]:
     """创建沙箱并等到可用，返回 (sandboxId, ttl 秒)。"""
-    logger.info("开始创建沙箱并等待就绪")
+    logger.info(
+        "开始创建沙箱并等待就绪 template_id=%s user_data_subpath=%s",
+        (template_id or Config.SANDBOX_TEMPLATE_ID or "").strip() or "(未指定)",
+        (user_data_subpath or "").strip() or "(配置默认)",
+    )
     started = time.monotonic()
-    data = create_sandbox()
+    data = create_sandbox(
+        template_id=template_id,
+        user_data_subpath=user_data_subpath,
+    )
     sandbox_id = str(data["sandboxId"])
     status = data.get("status")
     wait_until_running(sandbox_id, initial_status=str(status) if status else None)

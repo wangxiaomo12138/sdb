@@ -191,12 +191,21 @@ class Config:
         return item
 
     @classmethod
-    def build_x_mounts(cls) -> Optional[list[dict[str, Any]]]:
-        """组装创建沙箱请求的 x-mounts（最多两项：用户数据 + OpenCode 离线包）。"""
+    def build_x_mounts(
+        cls,
+        *,
+        user_data_subpath: Optional[str] = None,
+    ) -> Optional[list[dict[str, Any]]]:
+        """组装创建沙箱请求的 x-mounts（最多两项：用户数据 + OpenCode 离线包）。
+
+        用户数据 subPath 优先使用入参（按用户隔离）；未传时回退配置。
+        OpenCode 离线包挂载始终使用配置，不受入参影响。
+        """
         mounts: list[dict[str, Any]] = []
+        user_subpath = (user_data_subpath or "").strip() or cls.SANDBOX_NAS_USER_DATA_SUBPATH
         user_data = cls._mount_item(
             workspace_id=cls.SANDBOX_NAS_USER_DATA_WORKSPACE_ID,
-            subpath=cls.SANDBOX_NAS_USER_DATA_SUBPATH,
+            subpath=user_subpath,
             mount_path=cls.SANDBOX_NAS_USER_DATA_MOUNT_PATH,
             read_only=cls.SANDBOX_NAS_USER_DATA_READ_ONLY,
         )

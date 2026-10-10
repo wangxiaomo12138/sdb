@@ -10,7 +10,11 @@ from flask import Blueprint, Response, current_app, jsonify, request, stream_wit
 
 from app.logging_utils import preview
 from app.sandbox_client import check_sandbox_health, stream_opencode
-from app.sandbox_env import stream_create_sandbox_env, validate_skill_file_urls
+from app.sandbox_env import (
+    stream_create_sandbox_env,
+    validate_create_env_params,
+    validate_skill_file_urls,
+)
 
 api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
@@ -73,6 +77,7 @@ def create_sandbox_session():
     req_id = uuid.uuid4().hex[:12]
     body = request.get_json(silent=True) or {}
     try:
+        template_id, sub_path = validate_create_env_params(body)
         skill_urls = validate_skill_file_urls(body.get("skill_file"))
     except ValueError as exc:
         logger.warning(
@@ -84,8 +89,11 @@ def create_sandbox_session():
         ",".join(skill_urls) if skill_urls else None
     )
     logger.info(
-        "收到创建沙箱环境请求 请求ID=%s skill_file数量=%s skill_file=%s 来源IP=%s",
+        "收到创建沙箱环境请求 请求ID=%s template_id=%s sub_path=%s "
+        "skill_file数量=%s skill_file=%s 来源IP=%s",
         req_id,
+        template_id,
+        sub_path,
         len(skill_urls or []),
         preview(skill_file_raw or "(无)"),
         request.remote_addr,
@@ -96,7 +104,11 @@ def create_sandbox_session():
         final_session: Optional[str] = None
         status_count = 0
         try:
-            for event in stream_create_sandbox_env(skill_file=skill_file_raw):
+            for event in stream_create_sandbox_env(
+                template_id=template_id,
+                sub_path=sub_path,
+                skill_file=skill_file_raw,
+            ):
                 etype = event.get("type")
                 if etype == "ready":
                     final_session = event.get("session_id")

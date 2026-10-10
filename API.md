@@ -99,15 +99,19 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
+| `template_id` | string | 是 | 沙箱模板 ID（也可用 camelCase：`templateId`） |
+| `sub_path` | string | 是 | 用户数据 NAS 的 `subPath`，用于按用户隔离（也可用 `subPath`） |
 | `skill_file` | string | 否 | 可直接 HTTP 下载的 skill 文件或压缩包 URL；多个用英文逗号分隔（如预签名 S3 链接） |
+
+`template_id` 写入 APIG 创建体的 `templateId`。`sub_path` 写入用户数据 NAS 挂载的 `subPath`；OpenCode 离线包 NAS 仍使用服务端配置，不随请求变化。
 
 ```json
 {
+  "template_id": "tpl-xxx",
+  "sub_path": "users/u-1001",
   "skill_file": "https://example.com/skills/a.zip,https://example.com/skills/b.zip"
 }
 ```
-
-无 skill 时可传空对象 `{}`。
 
 #### 响应
 
@@ -159,7 +163,7 @@ data: {"type":"ready","session_id":"a1b2c3d4e5f6..."}
 ```bash
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{"template_id":"tpl-xxx","sub_path":"users/u-1001"}'
 ```
 
 ---
@@ -238,7 +242,7 @@ data: {"type":"error","message":"sandbox session not found or expired; create vi
 # 先创建环境，从 SSE ready 事件取出 session_id
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{"template_id":"tpl-xxx","sub_path":"users/u-1001"}'
 # 假设得到 session_id=a1b2c3d4e5f6...
 
 # 第一轮
