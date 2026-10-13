@@ -35,16 +35,21 @@ class TaskWorker:
             return
 
         logger.info(
-            "开始执行任务 任务ID=%s session_id=%s 问题=%s",
+            "开始执行任务 任务ID=%s session_id=%s opencode_session_id=%s 问题=%s",
             task_id,
             task.session_id,
+            task.opencode_session_id or "(new)",
             preview(task.query),
         )
         self.store.mark_running(task_id)
         started = time.monotonic()
         answer = ""
         try:
-            for event in stream_opencode(task.query, session_id=task.session_id):
+            for event in stream_opencode(
+                task.query,
+                session_id=task.session_id,
+                opencode_session_id=task.opencode_session_id,
+            ):
                 etype = event.get("type")
                 if etype == "status":
                     self.store.append_stage(
@@ -57,11 +62,17 @@ class TaskWorker:
                 elif etype == "done":
                     final = event.get("answer") or answer
                     elapsed_ms = (time.monotonic() - started) * 1000
-                    self.store.mark_succeeded(task_id, final)
+                    self.store.mark_succeeded(
+                        task_id,
+                        final,
+                        opencode_session_id=event.get("opencode_session_id"),
+                    )
                     logger.info(
-                        "任务执行成功 任务ID=%s session_id=%s 耗时毫秒=%.1f 回复=%s",
+                        "任务执行成功 任务ID=%s session_id=%s "
+                        "opencode_session_id=%s 耗时毫秒=%.1f 回复=%s",
                         task_id,
                         task.session_id,
+                        event.get("opencode_session_id") or "(无)",
                         elapsed_ms,
                         preview(final),
                     )

@@ -12,7 +12,7 @@ Flask 代理服务：环境创建与提问分离——先按 `session_id` 拉起
 | 沙箱按会话复用 | 同一 `session_id` 绑定同一 `sandboxId` |
 | 双 NAS 挂载 | 创建时 `x-mounts` 最多两项：用户数据 + OpenCode 离线包 |
 | 沙箱保活 | 默认 TTL 900s；环境创建或提问执行中（`active_count>0`）且即将到期时 refresh |
-| 多轮对话 | 缓存 OpenCode `sessionID`，后续 `opencode run --session` |
+| 多轮对话 | 客户端传 `opencode_session_id` → `opencode run --session`；不传则新开 |
 | 流式输出 | OpenCode `--format json` → 解析 NDJSON → SSE `status/delta/done/error` |
 | 网关鉴权可配置 | APIG 与 SDK 共用 `X-HW-ID` / `X-HW-APPKEY`；SDK 另带 `x-livefunction-sandbox-id` |
 
@@ -41,10 +41,11 @@ flowchart LR
   Client -->|POST /api/sandbox/session SSE| Flask
   Client -->|POST /api/chat SSE| Flask
   Client -->|POST /api/query 轮询| Flask
+  Client -->|GET /api/sessions list_export| Flask
   Flask --> SessMgr
   SessMgr -->|create / refresh| APIG
   Flask -->|headers 含 sandboxId| Exec
-  Exec -->|opencode run --format json| OC
+  Exec -->|opencode run/list/export| OC
   OC -->|NDJSON sessionID/text| Flask
   Flask -->|SSE status/delta/done/ready| Client
 ```
@@ -56,13 +57,13 @@ run.py                     入口
 app/
   __init__.py              create_app：TaskStore + TaskWorker
   config.py                环境变量
-  routes.py                HTTP：/health /api/sandbox/session /api/chat /api/query /api/tasks
-  models.py                异步任务内存存储（含 stages）
+  routes.py                HTTP：/health /api/sandbox/session /api/chat /api/query /api/tasks /api/sessions
+  models.py                异步任务内存存储（含 stages、opencode_session_id）
   worker.py                线程池消费 /api/query
   session_sandbox.py       session_id → sandboxId + opencode_session_id
   sandbox_lifecycle.py     APIG create / refresh / wait
   sandbox_env.py           环境创建编排：挂载后拷贝 OpenCode、下载 skill
-  sandbox_client.py        组命令、流式拉 stdout、解析 OpenCode 事件
+  sandbox_client.py        组命令、流式拉 stdout、解析 OpenCode 事件；list/export
 ```
 
 | 模块 | 职责 |
@@ -85,25 +86,32 @@ app/
 
 ### 4.2 SSE 对话（推荐）
 
-1. `POST /api/chat` 校验 `session_id`、`query`
+1. `POST /api/chat` 校验 `session_id`、`query`、可选 `opencode_session_id`
 2. `stream_opencode` → `get_active(session_id)`；不存在/过期则 `error`（**不**自动创建）
-3. 存在则 `begin_task` → `opencode run --format json` → `end_task`
+3. 存在则 `begin_task` → `opencode run --format json [--session …]` → `end_task`  
+   （仅请求传入 `opencode_session_id` 时加 `--session`；不读服务端缓存自动续聊）
 4. 后台线程：`active_count>0` 且剩余 TTL ≤ 120s 才 refresh
-5. 解析 JSON 行：抽出 `sessionID` 写回 manager；`text` 转增量 `delta`
+5. 解析 JSON 行：抽出 `sessionID` 写回 manager（排查用）；`text` 转增量 `delta`；`done` 带回 `opencode_session_id`
 6. Flask 把事件写成 `data: {...}\n\n`（含轻量 `status`）
 
 ### 4.3 异步轮询
 
-`POST /api/query` 写入 `TaskStore` 并 `202`；`TaskWorker` 消费 `stream_opencode`：`status` 写入 `stages`/`current_stage`，`done` 落 `answer`。`GET /api/tasks/<id>` 读内存任务。
+`POST /api/query` 写入 `TaskStore`（含可选 `opencode_session_id`）并 `202`；`TaskWorker` 消费 `stream_opencode`：`status` → `stages`；`done` → `answer` + `opencode_session_id`。`GET /api/tasks/<id>` 读内存任务。
 
-### 4.4 两种 Session ID
+### 4.4 Session 列表与详情
+
+1. `GET /api/sessions?session_id=…` → `export SANDBOX_ENV_VARS…; opencode session list --format json`
+2. `GET /api/sessions/<opencode_session_id>?session_id=…` → `opencode export <id>`
+3. 均经 `get_active` + `begin_task` / `end_task`，与 chat 同一沙箱
+
+### 4.5 两种 Session ID
 
 | ID | 谁产生 | 作用 |
 |----|--------|------|
-| 业务 `session_id` | 环境创建接口（`ready` 事件） | 绑定沙箱 + 多轮 |
-| OpenCode `sessionID`（如 `ses_...`） | OpenCode JSON 事件 | `--session` 续聊 |
+| 业务 `session_id` | 环境创建接口（`ready` 事件） | 绑定沙箱 |
+| `opencode_session_id`（如 `ses_...`） | OpenCode；经 `done`/task 回传 | 客户端选择后传入以 `--session` 续聊 |
 
-二者不要混用。OpenCode ID 不对客户端暴露（SSE 的 `session` 事件只在服务端消费，不转发）。
+二者不要混用。内部 `session` 事件仍不单独转发给 SSE 客户端，只通过 `done.opencode_session_id` 暴露。
 
 ## 5. 配置分层
 
@@ -140,26 +148,26 @@ def create_app() -> Flask:
 
 ### 6.2 SSE 出口：边执行边推
 
-```45:67:app/routes.py
+```python
 @api_bp.post("/api/chat")
 def chat():
     # ...
     def generate():
-        for event in stream_opencode(query, session_id=session_id):
+        for event in stream_opencode(
+            query,
+            session_id=session_id,
+            opencode_session_id=opencode_session_id,
+        ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return Response(
         stream_with_context(generate()),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
+        ...
     )
 ```
 
-`stream_with_context` 保证生成器在请求上下文里跑。`X-Accel-Buffering: no` 避免前置代理把 SSE 攒成一块再吐。环境接口对外发 `status` / `ready` / `error`；提问接口对外发 `status` / `delta` / `done` / `error`（内部 `session` 事件在 `stream_opencode` 里被吃掉）。
+`stream_with_context` 保证生成器在请求上下文里跑。`X-Accel-Buffering: no` 避免前置代理把 SSE 攒成一块再吐。环境接口对外发 `status` / `ready` / `error`；提问接口对外发 `status` / `delta` / `done` / `error`（内部 `session` 事件在 `stream_opencode` 里被吃掉，通过 `done.opencode_session_id` 暴露）。
 
 ### 6.3 按 session 拿沙箱（环境创建 vs 提问）
 
@@ -248,7 +256,7 @@ SSE 路径里 `OpenCodeError` 不吞掉（HTTP 4xx 等直接失败）；其它�
 
 ### 6.9 异步任务
 
-Worker 消费 `stream_opencode`：`status` → `append_stage`；`done` → `mark_succeeded`。与 chat **共用** `get_active` 与 OpenCode session 缓存：同一 `session_id` 须先经环境创建接口，再 chat/query。线程池大小 `WORKER_MAX_WORKERS`。
+Worker 消费 `stream_opencode`：`status` → `append_stage`；`done` → `mark_succeeded`（含 `opencode_session_id`）。与 chat **共用** `get_active`：同一业务 `session_id` 须先经环境创建接口；续聊由请求中的 `opencode_session_id` 决定。线程池大小 `WORKER_MAX_WORKERS`。
 
 ## 7. 失败与恢复
 
@@ -259,7 +267,7 @@ Worker 消费 `stream_opencode`：`status` → `append_stage`；`done` → `mark
 | `starting` | 短等后尝试使用，不 refresh 探活 |
 | 空闲到期 | 不续期；提问失败，需重新调环境创建接口 |
 | 忙且快到期 | 后台 refresh；失败则任务可能在实例销毁后中断 |
-| `--session` 续聊失败 | 清空 `opencode_session_id`，下一轮当新会话 |
+| `--session` 续聊失败 | 清空服务端缓存的 `opencode_session_id`；客户端可不传 ID 新开，或换 ID 再试 |
 | JSON 无 `text` 事件 | `opencode returned no text events` |
 | 进程重启 | 任务与映射全丢，客户端需新 `session_id` 或接受新沙箱 |
 

@@ -24,6 +24,7 @@ class Task:
     status: str = "pending"  # pending | running | succeeded | failed
     answer: Optional[str] = None
     error: Optional[str] = None
+    opencode_session_id: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     finished_at: Optional[str] = None
     current_stage: Optional[str] = None
@@ -41,19 +42,27 @@ class TaskStore:
         self._lock = threading.Lock()
         logger.info("任务存储已初始化（进程内存）")
 
-    def create(self, query: str, session_id: str) -> Task:
+    def create(
+        self,
+        query: str,
+        session_id: str,
+        opencode_session_id: Optional[str] = None,
+    ) -> Task:
         task = Task(
             task_id=str(uuid.uuid4()),
             query=query,
             session_id=session_id,
+            opencode_session_id=opencode_session_id,
         )
         with self._lock:
             self._tasks[task.task_id] = task
             total = len(self._tasks)
         logger.info(
-            "任务已创建 任务ID=%s session_id=%s 状态=pending 当前任务数=%s 问题=%s",
+            "任务已创建 任务ID=%s session_id=%s opencode_session_id=%s "
+            "状态=pending 当前任务数=%s 问题=%s",
             task.task_id,
             session_id,
+            opencode_session_id or "(new)",
             total,
             preview(query),
         )
@@ -92,7 +101,12 @@ class TaskStore:
             task.status = "running"
         logger.info("任务状态变更 状态=running 任务ID=%s", task_id)
 
-    def mark_succeeded(self, task_id: str, answer: str) -> None:
+    def mark_succeeded(
+        self,
+        task_id: str,
+        answer: str,
+        opencode_session_id: Optional[str] = None,
+    ) -> None:
         with self._lock:
             task = self._tasks.get(task_id)
             if task is None:
@@ -101,10 +115,14 @@ class TaskStore:
             task.status = "succeeded"
             task.answer = answer
             task.error = None
+            if opencode_session_id is not None:
+                task.opencode_session_id = opencode_session_id
             task.finished_at = _utc_now_iso()
         logger.info(
-            "任务状态变更 状态=succeeded 任务ID=%s 回复字符数=%s",
+            "任务状态变更 状态=succeeded 任务ID=%s opencode_session_id=%s "
+            "回复字符数=%s",
             task_id,
+            opencode_session_id or "(保留原值)",
             len(answer or ""),
         )
 

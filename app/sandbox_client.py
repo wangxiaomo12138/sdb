@@ -30,6 +30,16 @@ class OpenCodeError(Exception):
     """沙箱或 OpenCode 执行失败。"""
 
 
+class SandboxSessionNotFoundError(OpenCodeError):
+    """业务 session 对应的沙箱不存在或已过期。"""
+
+
+_SANDBOX_SESSION_MISSING = (
+    "sandbox session not found or expired; "
+    "create via POST /api/sandbox/session first"
+)
+
+
 class SandboxHttpError(OpenCodeError):
     """运行面 HTTP 错误；网关 502/503/504 可回退到 SDK 轮询。"""
 
@@ -775,21 +785,85 @@ def status_event(stage: str, message: str) -> dict[str, Any]:
     return {"type": "status", "stage": stage, "message": message}
 
 
+def _require_active_binding(session_id: str) -> SessionSandboxBinding:
+    binding = session_sandbox_manager.get_active(session_id)
+    if binding is None:
+        raise SandboxSessionNotFoundError(_SANDBOX_SESSION_MISSING)
+    return binding
+
+
+def _run_opencode_cli(
+    session_id: str,
+    cli_tail: str,
+    *,
+    timeout: float = 60.0,
+) -> str:
+    """在业务 session 对应沙箱内执行 opencode CLI（先注入 SANDBOX_ENV_VARS）。"""
+    binding = _require_active_binding(session_id)
+    parts = _opencode_env_exports()
+    parts.append(cli_tail)
+    command = "; ".join(parts)
+    logger.info(
+        "OpenCode CLI 开始 session_id=%s sandbox_id=%s 超时秒=%s 命令=%s",
+        session_id,
+        binding.sandbox_id,
+        timeout,
+        preview(command, 300),
+    )
+    logger.info("OpenCode CLI 命令原样(可复制调试)\n%s", command)
+    session_sandbox_manager.begin_task(session_id)
+    try:
+        return run_sandbox_command(
+            command, sandbox_id=binding.sandbox_id, timeout=timeout
+        )
+    finally:
+        session_sandbox_manager.end_task(session_id)
+
+
+def list_opencode_sessions(session_id: str) -> Any:
+    """执行 `opencode session list --format json`，返回解析后的 JSON。"""
+    raw = _run_opencode_cli(session_id, "opencode session list --format json")
+    text = raw.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OpenCodeError(
+            f"opencode session list returned non-JSON: {preview(text, 300)}"
+        ) from exc
+
+
+def export_opencode_session(session_id: str, opencode_session_id: str) -> Any:
+    """执行 `opencode export <id>`；能解析为 JSON 则返回对象，否则返回字符串。"""
+    cli_tail = f"opencode export {shlex.quote(opencode_session_id)}"
+    raw = _run_opencode_cli(session_id, cli_tail)
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def stream_opencode(
     query: str,
     *,
     session_id: str,
+    opencode_session_id: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> Generator[dict[str, Any], None, None]:
     """在已存在的 session 沙箱上执行 opencode，产出对话事件。
 
     事件类型：status | delta | session | done | error
     沙箱不存在或已过期时直接 error，不会自动创建。
+    传入 opencode_session_id 则续聊；不传则开新对话（不用服务端缓存自动续聊）。
     """
     timeout = Config.OPENCODE_TIMEOUT_SECONDS if timeout is None else timeout
     logger.info(
-        "开始流式执行OpenCode session_id=%s 超时秒=%s 问题=%s",
+        "开始流式执行OpenCode session_id=%s opencode_session_id=%s "
+        "超时秒=%s 问题=%s",
         session_id,
+        opencode_session_id or "(new)",
         timeout,
         preview(query),
     )
@@ -798,18 +872,24 @@ def stream_opencode(
 
     binding = session_sandbox_manager.get_active(session_id)
     if binding is None:
-        msg = (
-            "sandbox session not found or expired; "
-            "create via POST /api/sandbox/session first"
+        logger.error(
+            "提问时沙箱不可用 session_id=%s 错误=%s",
+            session_id,
+            _SANDBOX_SESSION_MISSING,
         )
-        logger.error("提问时沙箱不可用 session_id=%s 错误=%s", session_id, msg)
-        yield {"type": "error", "message": msg}
+        yield {"type": "error", "message": _SANDBOX_SESSION_MISSING}
         return
 
     yield status_event("processing", "正在处理请求")
     session_sandbox_manager.begin_task(session_id)
     try:
-        yield from _stream_opencode_bound(query, session_id, binding, timeout)
+        yield from _stream_opencode_bound(
+            query,
+            session_id,
+            binding,
+            timeout,
+            request_opencode_session_id=opencode_session_id,
+        )
     finally:
         session_sandbox_manager.end_task(session_id)
 
@@ -819,8 +899,12 @@ def _stream_opencode_bound(
     session_id: str,
     binding: SessionSandboxBinding,
     timeout: float,
+    *,
+    request_opencode_session_id: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, None]:
-    opencode_session_id = binding.opencode_session_id
+    # 续聊完全由请求参数决定，不再读取 binding.opencode_session_id
+    opencode_session_id = request_opencode_session_id or None
+    resolved_opencode_session_id = opencode_session_id
     command = _build_opencode_command(query, opencode_session_id=opencode_session_id)
     answer = ""
     errored = False
@@ -834,14 +918,21 @@ def _stream_opencode_bound(
         timeout,
     )
 
+    def _done_event(final_answer: str) -> dict[str, Any]:
+        payload: dict[str, Any] = {"type": "done", "answer": final_answer}
+        if resolved_opencode_session_id:
+            payload["opencode_session_id"] = resolved_opencode_session_id
+        return payload
+
     try:
         lines = _iter_ndjson_lines(
             _stream_command_lines(command, timeout, binding.sandbox_id)
         )
         for event in _parse_opencode_events(lines):
             if event["type"] == "session":
+                resolved_opencode_session_id = event["opencode_session_id"]
                 session_sandbox_manager.set_opencode_session_id(
-                    session_id, event["opencode_session_id"]
+                    session_id, resolved_opencode_session_id
                 )
                 continue
             if event["type"] == "delta":
@@ -850,7 +941,7 @@ def _stream_opencode_bound(
                 continue
             if event["type"] == "error":
                 errored = True
-                # 续聊失败则清掉 OpenCode session，下次当新会话
+                # 续聊失败则清掉 OpenCode session 缓存
                 if opencode_session_id:
                     session_sandbox_manager.clear_opencode_session_id(session_id)
                 logger.warning(
@@ -867,13 +958,14 @@ def _stream_opencode_bound(
                 answer = event.get("answer") or answer
                 logger.info(
                     "流式OpenCode完成 session_id=%s sandbox_id=%s "
-                    "耗时毫秒=%.1f 回复字符数=%s",
+                    "opencode_session_id=%s 耗时毫秒=%.1f 回复字符数=%s",
                     session_id,
                     binding.sandbox_id,
+                    resolved_opencode_session_id or "(无)",
                     (time.monotonic() - started) * 1000,
                     len(answer or ""),
                 )
-                yield event
+                yield _done_event(answer)
                 return
     except OpenCodeError as exc:
         if opencode_session_id:
@@ -899,27 +991,37 @@ def _stream_opencode_bound(
 
     if not errored:
         logger.info(
-            "流式OpenCode兜底完成 session_id=%s 回复字符数=%s "
-            "耗时毫秒=%.1f",
+            "流式OpenCode兜底完成 session_id=%s opencode_session_id=%s "
+            "回复字符数=%s 耗时毫秒=%.1f",
             session_id,
+            resolved_opencode_session_id or "(无)",
             len(answer),
             (time.monotonic() - started) * 1000,
         )
-        yield {"type": "done", "answer": answer}
+        yield _done_event(answer)
 
 
 def run_opencode(
     query: str,
     *,
     session_id: str,
+    opencode_session_id: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> str:
     """在指定 session 上跑完 OpenCode，返回本轮完整回复文本。"""
     logger.info(
-        "开始同步执行OpenCode session_id=%s 问题=%s", session_id, preview(query)
+        "开始同步执行OpenCode session_id=%s opencode_session_id=%s 问题=%s",
+        session_id,
+        opencode_session_id or "(new)",
+        preview(query),
     )
     answer = ""
-    for event in stream_opencode(query, session_id=session_id, timeout=timeout):
+    for event in stream_opencode(
+        query,
+        session_id=session_id,
+        opencode_session_id=opencode_session_id,
+        timeout=timeout,
+    ):
         if event["type"] == "delta":
             answer += event.get("text") or ""
         elif event["type"] == "done":

@@ -8,12 +8,12 @@ Base URL 默认：`http://127.0.0.1:5000`（以 `.env` 中 `FLASK_HOST` / `FLASK
 
 | 概念 | 说明 |
 |------|------|
-| `session_id` | 由 `POST /api/sandbox/session` 的 `ready` 事件返回；后续提问带此 ID，同一值复用同一沙箱与 OpenCode 多轮对话 |
-| OpenCode `sessionID` | 服务端从 `opencode run --format json` 事件中解析并缓存，客户端无需感知 |
+| `session_id` | 由 `POST /api/sandbox/session` 的 `ready` 事件返回；后续提问带此 ID，同一值复用同一沙箱 |
+| `opencode_session_id` | OpenCode 对话 ID（如 `ses_…`）；chat/query 的 `done` / 任务结果会回传；可选传入以续聊；也可用列表/详情接口查询 |
 
 - 任务状态与 session→沙箱映射均在**进程内存**中，服务重启后丢失
 - gunicorn 请使用 `-w 1`，避免多 worker 导致任务/session 不一致
-- **推荐顺序**：先 `POST /api/sandbox/session` 取得返回的 `session_id`，再调用 `/api/chat` 或 `/api/query`
+- **推荐顺序**：先 `POST /api/sandbox/session` 取得 `session_id` → chat/query → 从 `done` 取 `opencode_session_id` 续聊；可用 `/api/sessions` 列历史、`/api/sessions/<opencode_session_id>` 看详情
 
 ### 公共错误
 
@@ -170,9 +170,11 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 ### `POST /api/chat`
 
-同步建立 SSE 连接，按已创建环境的 `session_id` 多轮对话并流式返回助手文本。
+同步建立 SSE 连接，在已创建环境的 `session_id` 上对话并流式返回助手文本。
 
-**不会自动创建沙箱**；若 session 不存在或已过期，返回 `error`，需先调用 `/api/sandbox/session`。
+- **不传** `opencode_session_id`：开新 OpenCode 对话
+- **传入** `opencode_session_id`：对该 OpenCode 会话续聊
+- **不会自动创建沙箱**；若业务 session 不存在或已过期，返回 `error`，需先调用 `/api/sandbox/session`
 
 #### Headers
 
@@ -185,13 +187,24 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 环境创建接口返回的会话 ID |
+| `session_id` | string | 是 | 环境创建接口返回的业务会话 ID |
 | `query` | string | 是 | 本轮用户问题，非空 |
+| `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
 
 ```json
 {
   "session_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python"
+}
+```
+
+续聊示例：
+
+```json
+{
+  "session_id": "a1b2c3d4e5f6...",
+  "opencode_session_id": "ses_xxx",
+  "query": "再给一个代码示例"
 }
 ```
 
@@ -207,7 +220,7 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 |--------|------|------|
 | `status` | `stage`, `message` | 提问路径进度（如检查沙箱、正在处理） |
 | `delta` | `text` | 助手增量文本 |
-| `done` | `answer` | 本轮结束，完整回复文本 |
+| `done` | `answer`, `opencode_session_id` | 本轮结束；`opencode_session_id` 供后续续聊 |
 | `error` | `message` | 执行失败 |
 
 提问路径常见 `stage`：`request_received`、`checking_sandbox`、`processing`。
@@ -225,7 +238,7 @@ data: {"type":"delta","text":"Python"}
 
 data: {"type":"delta","text":" 是一种解释型语言。"}
 
-data: {"type":"done","answer":"Python 是一种解释型语言。"}
+data: {"type":"done","answer":"Python 是一种解释型语言。","opencode_session_id":"ses_xxx"}
 ```
 
 沙箱未创建示例：
@@ -243,15 +256,15 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -d '{"sub_path":"users/u-1001"}'
 # 假设得到 session_id=a1b2c3d4e5f6...
 
-# 第一轮
+# 第一轮（新开），从 done 取出 opencode_session_id
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"a1b2c3d4e5f6...","query":"用一句话介绍 Python"}'
 
-# 第二轮（同一 session_id，续聊）
+# 第二轮（显式传入 opencode_session_id 续聊）
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"a1b2c3d4e5f6...","query":"再给一个代码示例"}'
+  -d '{"session_id":"a1b2c3d4e5f6...","opencode_session_id":"ses_xxx","query":"再给一个代码示例"}'
 ```
 
 ---
@@ -260,7 +273,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 
 ### `POST /api/query`
 
-提交任务后立即返回 `task_id`，后台执行；客户端轮询任务结果。同样要求 session 环境已创建。
+提交任务后立即返回 `task_id`，后台执行；客户端轮询任务结果。同样要求 session 环境已创建。续聊语义与 `/api/chat` 相同。
 
 #### Headers
 
@@ -274,8 +287,9 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 环境创建接口返回的会话 ID |
+| `session_id` | string | 是 | 环境创建接口返回的业务会话 ID |
 | `query` | string | 是 | 用户问题 |
+| `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
 
 ```json
 {
@@ -293,6 +307,8 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
   "status": "pending"
 }
 ```
+
+若请求带了 `opencode_session_id`，`202` 响应会原样带回；最终以任务结果中的值为准。
 
 #### 示例
 
@@ -321,6 +337,7 @@ curl -X POST http://127.0.0.1:5000/api/query \
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "query": "用一句话介绍 Python",
   "session_id": "user-1",
+  "opencode_session_id": "ses_xxx",
   "status": "succeeded",
   "answer": "Python 是一种解释型、通用的高级编程语言。",
   "error": null,
@@ -346,6 +363,8 @@ curl -X POST http://127.0.0.1:5000/api/query \
   ]
 }
 ```
+
+成功时 `opencode_session_id` 为可续聊的 OpenCode 会话 ID。
 
 #### `status` 枚举
 
@@ -377,20 +396,99 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 ---
 
+## 6. OpenCode Session 列表
+
+### `GET /api/sessions`
+
+在已绑定沙箱内执行 `opencode session list --format json`（执行前注入 `SANDBOX_ENV_VARS`）。
+
+#### Query 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 是 | 业务 session（定位沙箱） |
+
+#### 成功响应 `200`
+
+```json
+{
+  "session_id": "a1b2c3d4e5f6...",
+  "sessions": []
+}
+```
+
+`sessions` 为 CLI JSON 解析结果（结构随 OpenCode 版本而定）。
+
+#### 错误
+
+| HTTP | 说明 |
+|------|------|
+| `400` | 缺少 `session_id` |
+| `404` | 业务 session 不存在或已过期 |
+| `502` | CLI 执行失败或非 JSON |
+
+#### 示例
+
+```bash
+curl 'http://127.0.0.1:5000/api/sessions?session_id=a1b2c3d4e5f6...'
+```
+
+---
+
+## 7. OpenCode Session 详情
+
+### `GET /api/sessions/<opencode_session_id>`
+
+在已绑定沙箱内执行 `opencode export <opencode_session_id>`（执行前注入 `SANDBOX_ENV_VARS`）。
+
+#### 路径 / Query
+
+| 参数 | 位置 | 必填 | 说明 |
+|------|------|------|------|
+| `opencode_session_id` | path | 是 | OpenCode 会话 ID |
+| `session_id` | query | 是 | 业务 session（定位沙箱） |
+
+#### 成功响应 `200`
+
+```json
+{
+  "session_id": "a1b2c3d4e5f6...",
+  "opencode_session_id": "ses_xxx",
+  "export": {}
+}
+```
+
+`export`：CLI 输出能解析为 JSON 则为对象，否则为字符串。
+
+#### 错误
+
+与列表接口相同（`400` / `404` / `502`）。
+
+#### 示例
+
+```bash
+curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?session_id=a1b2c3d4e5f6...'
+```
+
+---
+
 ## 接口一览
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/health` | 健康检查 |
 | `POST` | `/api/sandbox/session` | SSE 创建/复用沙箱环境 |
-| `POST` | `/api/chat` | SSE 流式多轮对话（推荐） |
+| `POST` | `/api/chat` | SSE 流式对话（可选 `opencode_session_id` 续聊） |
 | `POST` | `/api/query` | 异步提交（非流式） |
 | `GET` | `/api/tasks/<task_id>` | 查询异步任务结果与进度 |
+| `GET` | `/api/sessions` | OpenCode 历史 session 列表 |
+| `GET` | `/api/sessions/<opencode_session_id>` | OpenCode session 聊天详情（export） |
 
 ## 调用建议
 
 1. 先调 **`/api/sandbox/session`**，从 `ready` 事件拿到服务端下发的 `session_id`
-2. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**
+2. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**；从 `done.opencode_session_id` 保存以便续聊
 3. 只需最终完整答案、可接受轮询：用 **`/api/query` + `/api/tasks/<id>`**
-4. 多轮时客户端稳定复用同一个 `session_id`；沙箱过期后需重新创建环境
-5. 不要依赖进程重启后的 session / 任务状态
+4. 续聊时显式传 `opencode_session_id`；不传则开新对话
+5. 用 **`/api/sessions`** 列历史，用 **`/api/sessions/<id>`** 看详情后再选 ID 续聊
+6. 沙箱过期后需重新创建环境；不要依赖进程重启后的 session / 任务状态

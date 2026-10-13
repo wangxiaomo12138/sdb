@@ -7,10 +7,11 @@ Python 3.10 Flask 服务：按 `session_id` 复用第三方沙箱与 OpenCode �
 ```
 Client -> POST /api/sandbox/session (SSE 建环境)
        -> POST /api/chat (SSE) 或 POST /api/query (异步轮询)
-       -> SessionSandboxManager（session_id -> sandboxId + opencode_session_id）
+       -> GET /api/sessions 列表 / GET /api/sessions/<id> 详情
+       -> SessionSandboxManager（session_id -> sandboxId）
        -> APIG create/refresh 沙箱实例（仅环境创建路径）
        -> agent-sandbox / docker exec
-       -> opencode run --format json [--session ...]
+       -> opencode run|session list|export（run 可选 --session）
 ```
 
 任务与 session 映射保存在进程内存中，**服务重启后会丢失**。提问前须先创建环境。
@@ -116,7 +117,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
   -d '{"session_id":"user-1","query":"用一句话介绍 Python"}'
 ```
 
-SSE `data` 为 JSON：`status` / `delta` / `done` / `error`。session 未创建或已过期会直接 `error`。
+SSE `data` 为 JSON：`status` / `delta` / `done` / `error`。`done` 含 `opencode_session_id`。续聊时在请求体加 `"opencode_session_id":"ses_xxx"`；不传则开新对话。session 未创建或已过期会直接 `error`。
 
 ### `POST /api/query`（异步轮询，非流式）
 
@@ -138,7 +139,16 @@ curl -X POST http://127.0.0.1:5000/api/query \
 curl http://127.0.0.1:5000/api/tasks/<task_id>
 ```
 
-`status`：`pending` | `running` | `succeeded` | `failed`；另含 `current_stage` / `stages` 提问进度。
+`status`：`pending` | `running` | `succeeded` | `failed`；另含 `opencode_session_id`、`current_stage` / `stages`。
+
+### `GET /api/sessions` / `GET /api/sessions/<opencode_session_id>`
+
+```bash
+curl 'http://127.0.0.1:5000/api/sessions?session_id=user-1'
+curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?session_id=user-1'
+```
+
+列表对应 `opencode session list --format json`；详情对应 `opencode export <id>`。均需业务 `session_id` 定位沙箱。
 
 ### `GET /health`
 
@@ -149,8 +159,8 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 ## Session 语义
 
-- 业务 `session_id`：由环境创建接口在 `ready` 事件中下发，绑定沙箱实例与 OpenCode 多轮会话
-- OpenCode `sessionID`：从 `opencode run --format json` 事件中解析并缓存；后续请求自动加 `--session`
-- 同一 `session_id` → 同一沙箱 + 同一 OpenCode 对话
+- 业务 `session_id`：由环境创建接口在 `ready` 事件中下发，绑定沙箱实例
+- `opencode_session_id`：由 chat/query 的 `done` / 任务结果回传；客户端可选传入以续聊，不传则开新对话
+- 同一业务 `session_id` → 同一沙箱；同一沙箱内可有多条 OpenCode 对话
 - 沙箱默认 900s 后过期销毁；**环境创建或提问执行中**，且剩余时间进入安全窗口（默认 120s）时才 refresh 续期
 - 空闲到期后提问会失败，需重新调用 `/api/sandbox/session`（OpenCode 会话不保留）
