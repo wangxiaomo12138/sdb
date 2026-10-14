@@ -35,9 +35,9 @@ class TaskWorker:
             return
 
         logger.info(
-            "开始执行任务 任务ID=%s session_id=%s opencode_session_id=%s 问题=%s",
+            "开始执行任务 任务ID=%s sandbox_id=%s opencode_session_id=%s 问题=%s",
             task_id,
-            task.session_id,
+            task.sandbox_id,
             task.opencode_session_id or "(new)",
             preview(task.query),
         )
@@ -47,7 +47,7 @@ class TaskWorker:
         try:
             for event in stream_opencode(
                 task.query,
-                session_id=task.session_id,
+                sandbox_id=task.sandbox_id,
                 opencode_session_id=task.opencode_session_id,
             ):
                 etype = event.get("type")
@@ -68,10 +68,10 @@ class TaskWorker:
                         opencode_session_id=event.get("opencode_session_id"),
                     )
                     logger.info(
-                        "任务执行成功 任务ID=%s session_id=%s "
+                        "任务执行成功 任务ID=%s sandbox_id=%s "
                         "opencode_session_id=%s 耗时毫秒=%.1f 回复=%s",
                         task_id,
-                        task.session_id,
+                        task.sandbox_id,
                         event.get("opencode_session_id") or "(无)",
                         elapsed_ms,
                         preview(final),
@@ -87,9 +87,9 @@ class TaskWorker:
         except OpenCodeError as exc:
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.warning(
-                "任务执行失败 任务ID=%s session_id=%s 耗时毫秒=%.1f 错误=%s",
+                "任务执行失败 任务ID=%s sandbox_id=%s 耗时毫秒=%.1f 错误=%s",
                 task_id,
-                task.session_id,
+                task.sandbox_id,
                 elapsed_ms,
                 preview(exc, 500),
             )
@@ -97,9 +97,9 @@ class TaskWorker:
         except Exception as exc:  # 未预期异常
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.exception(
-                "任务发生未预期异常 任务ID=%s session_id=%s 耗时毫秒=%.1f",
+                "任务发生未预期异常 任务ID=%s sandbox_id=%s 耗时毫秒=%.1f",
                 task_id,
-                task.session_id,
+                task.sandbox_id,
                 elapsed_ms,
             )
             self.store.mark_failed(task_id, f"unexpected error: {exc}")

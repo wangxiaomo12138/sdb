@@ -52,14 +52,14 @@ def _parse_optional_opencode_session_id(
     return stripped or None
 
 
-def _parse_session_query(
+def _parse_sandbox_query(
     body: dict,
 ) -> Union[
     Tuple[str, str, Optional[str]],
     Tuple[None, Tuple[Response, int]],
 ]:
     query = body.get("query")
-    session_id = body.get("session_id")
+    sandbox_id = body.get("sandbox_id")
     if not isinstance(query, str) or not query.strip():
         logger.warning(
             "请求参数校验失败 原因=缺少query 路径=%s",
@@ -69,37 +69,37 @@ def _parse_session_query(
             jsonify({"error": "query is required and must be a non-empty string"}),
             400,
         )
-    if not isinstance(session_id, str) or not session_id.strip():
+    if not isinstance(sandbox_id, str) or not sandbox_id.strip():
         logger.warning(
-            "请求参数校验失败 原因=缺少session_id 路径=%s",
+            "请求参数校验失败 原因=缺少sandbox_id 路径=%s",
             request.path,
         )
         return None, (
             jsonify(
-                {"error": "session_id is required and must be a non-empty string"}
+                {"error": "sandbox_id is required and must be a non-empty string"}
             ),
             400,
         )
     oc = _parse_optional_opencode_session_id(body)
     if isinstance(oc, tuple):
         return oc
-    return session_id.strip(), query.strip(), oc
+    return sandbox_id.strip(), query.strip(), oc
 
 
-def _require_query_session_id() -> Union[str, Tuple[Response, int]]:
-    session_id = request.args.get("session_id")
-    if not isinstance(session_id, str) or not session_id.strip():
+def _require_query_sandbox_id() -> Union[str, Tuple[Response, int]]:
+    sandbox_id = request.args.get("sandbox_id")
+    if not isinstance(sandbox_id, str) or not sandbox_id.strip():
         logger.warning(
-            "请求参数校验失败 原因=缺少session_id 路径=%s",
+            "请求参数校验失败 原因=缺少sandbox_id 路径=%s",
             request.path,
         )
         return (
             jsonify(
-                {"error": "session_id is required and must be a non-empty string"}
+                {"error": "sandbox_id is required and must be a non-empty string"}
             ),
             400,
         )
-    return session_id.strip()
+    return sandbox_id.strip()
 
 
 @api_bp.get("/health")
@@ -127,7 +127,7 @@ def health():
 
 @api_bp.post("/api/sandbox/session")
 def create_sandbox_session():
-    """SSE：创建沙箱环境（NAS 挂载、OpenCode 拷贝、可选 skill）；session_id 由服务端返回。"""
+    """SSE：创建沙箱环境；ready 返回 APIG sandbox_id（Docker 为 docker:{uuid}）。"""
     req_id = uuid.uuid4().hex[:12]
     body = request.get_json(silent=True) or {}
     try:
@@ -154,7 +154,7 @@ def create_sandbox_session():
 
     def generate():
         started = time.monotonic()
-        final_session: Optional[str] = None
+        final_sandbox: Optional[str] = None
         status_count = 0
         try:
             for event in stream_create_sandbox_env(
@@ -163,11 +163,11 @@ def create_sandbox_session():
             ):
                 etype = event.get("type")
                 if etype == "ready":
-                    final_session = event.get("session_id")
+                    final_sandbox = event.get("sandbox_id")
                     logger.info(
-                        "创建沙箱环境SSE就绪 请求ID=%s session_id=%s",
+                        "创建沙箱环境SSE就绪 请求ID=%s sandbox_id=%s",
                         req_id,
-                        final_session,
+                        final_sandbox,
                     )
                 elif etype == "status":
                     status_count += 1
@@ -190,10 +190,10 @@ def create_sandbox_session():
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         finally:
             logger.info(
-                "创建沙箱环境结束 请求ID=%s session_id=%s 状态事件数=%s "
+                "创建沙箱环境结束 请求ID=%s sandbox_id=%s 状态事件数=%s "
                 "耗时毫秒=%.1f",
                 req_id,
-                final_session or "(无)",
+                final_sandbox or "(无)",
                 status_count,
                 (time.monotonic() - started) * 1000,
             )
@@ -214,16 +214,16 @@ def chat():
     """SSE 流式对话。可选 opencode_session_id 续聊；不传则开新对话。"""
     req_id = uuid.uuid4().hex[:12]
     body = request.get_json(silent=True) or {}
-    parsed = _parse_session_query(body)
+    parsed = _parse_sandbox_query(body)
     if parsed[0] is None:
         err_resp, status = parsed[1]  # type: ignore[misc]
         return err_resp, status
-    session_id, query, opencode_session_id = parsed  # type: ignore[misc]
+    sandbox_id, query, opencode_session_id = parsed  # type: ignore[misc]
     logger.info(
-        "收到流式对话请求 请求ID=%s session_id=%s opencode_session_id=%s "
+        "收到流式对话请求 请求ID=%s sandbox_id=%s opencode_session_id=%s "
         "问题=%s 来源IP=%s",
         req_id,
-        session_id,
+        sandbox_id,
         opencode_session_id or "(new)",
         preview(query),
         request.remote_addr,
@@ -242,7 +242,7 @@ def chat():
         try:
             for event in stream_opencode(
                 query,
-                session_id=session_id,
+                sandbox_id=sandbox_id,
                 opencode_session_id=opencode_session_id,
             ):
                 etype = event.get("type") or "other"
@@ -255,9 +255,9 @@ def chat():
                     event_counts["other"] += 1
                 if etype in {"done", "error", "status"}:
                     logger.info(
-                        "流式对话事件 请求ID=%s session_id=%s 类型=%s 内容=%s",
+                        "流式对话事件 请求ID=%s sandbox_id=%s 类型=%s 内容=%s",
                         req_id,
-                        session_id,
+                        sandbox_id,
                         etype,
                         preview(
                             event.get("message")
@@ -270,19 +270,19 @@ def chat():
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except Exception:
             logger.exception(
-                "流式对话异常 请求ID=%s session_id=%s",
+                "流式对话异常 请求ID=%s sandbox_id=%s",
                 req_id,
-                session_id,
+                sandbox_id,
             )
             err = {"type": "error", "message": "unexpected stream error"}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         finally:
             elapsed_ms = (time.monotonic() - started) * 1000
             logger.info(
-                "流式对话结束 请求ID=%s session_id=%s 耗时毫秒=%.1f "
+                "流式对话结束 请求ID=%s sandbox_id=%s 耗时毫秒=%.1f "
                 "状态事件数=%s 增量事件数=%s 完成=%s 错误=%s 回复字符数=%s",
                 req_id,
-                session_id,
+                sandbox_id,
                 elapsed_ms,
                 event_counts["status"],
                 event_counts["delta"],
@@ -305,33 +305,33 @@ def chat():
 @api_bp.post("/api/query")
 def create_query():
     body = request.get_json(silent=True) or {}
-    parsed = _parse_session_query(body)
+    parsed = _parse_sandbox_query(body)
     if parsed[0] is None:
         err_resp, status = parsed[1]  # type: ignore[misc]
         return err_resp, status
-    session_id, query, opencode_session_id = parsed  # type: ignore[misc]
+    sandbox_id, query, opencode_session_id = parsed  # type: ignore[misc]
 
     store = current_app.extensions["task_store"]
     worker = current_app.extensions["task_worker"]
 
     task = store.create(
         query,
-        session_id=session_id,
+        sandbox_id=sandbox_id,
         opencode_session_id=opencode_session_id,
     )
     # 提交前先快照：worker 可能立刻改同一 Task 对象
     payload = {
         "task_id": task.task_id,
-        "session_id": task.session_id,
+        "sandbox_id": task.sandbox_id,
         "status": "pending",
     }
     if opencode_session_id:
         payload["opencode_session_id"] = opencode_session_id
     logger.info(
-        "异步查询已受理 任务ID=%s session_id=%s opencode_session_id=%s "
+        "异步查询已受理 任务ID=%s sandbox_id=%s opencode_session_id=%s "
         "问题=%s 来源IP=%s",
         task.task_id,
-        session_id,
+        sandbox_id,
         opencode_session_id or "(new)",
         preview(query),
         request.remote_addr,
@@ -348,10 +348,10 @@ def get_task(task_id: str):
         logger.warning("查询任务不存在 任务ID=%s", task_id)
         return jsonify({"error": "task not found"}), 404
     logger.info(
-        "查询任务成功 任务ID=%s session_id=%s opencode_session_id=%s "
+        "查询任务成功 任务ID=%s sandbox_id=%s opencode_session_id=%s "
         "状态=%s current_stage=%s",
         task.task_id,
-        task.session_id,
+        task.sandbox_id,
         task.opencode_session_id or "(无)",
         task.status,
         task.current_stage,
@@ -362,32 +362,32 @@ def get_task(task_id: str):
 @api_bp.get("/api/sessions")
 def list_sessions():
     """列出沙箱内 OpenCode 历史 session（opencode session list --format json）。"""
-    parsed = _require_query_session_id()
+    parsed = _require_query_sandbox_id()
     if not isinstance(parsed, str):
         return parsed
-    session_id = parsed
+    sandbox_id = parsed
     logger.info(
-        "收到 session 列表请求 session_id=%s 来源IP=%s",
-        session_id,
+        "收到 session 列表请求 sandbox_id=%s 来源IP=%s",
+        sandbox_id,
         request.remote_addr,
     )
     try:
-        sessions = list_opencode_sessions(session_id)
+        sessions = list_opencode_sessions(sandbox_id)
     except SandboxSessionNotFoundError as exc:
         logger.warning(
-            "session 列表失败：沙箱不存在 session_id=%s 错误=%s",
-            session_id,
+            "session 列表失败：沙箱不存在 sandbox_id=%s 错误=%s",
+            sandbox_id,
             exc,
         )
         return jsonify({"error": str(exc)}), 404
     except OpenCodeError as exc:
         logger.warning(
-            "session 列表失败 session_id=%s 错误=%s",
-            session_id,
+            "session 列表失败 sandbox_id=%s 错误=%s",
+            sandbox_id,
             preview(exc, 500),
         )
         return jsonify({"error": str(exc)}), 502
-    return jsonify({"session_id": session_id, "sessions": sessions})
+    return jsonify({"sandbox_id": sandbox_id, "sessions": sessions})
 
 
 @api_bp.get("/api/sessions/<opencode_session_id>")
@@ -406,36 +406,36 @@ def get_session_export(opencode_session_id: str):
             ),
             400,
         )
-    parsed = _require_query_session_id()
+    parsed = _require_query_sandbox_id()
     if not isinstance(parsed, str):
         return parsed
-    session_id = parsed
+    sandbox_id = parsed
     logger.info(
-        "收到 session 详情请求 session_id=%s opencode_session_id=%s 来源IP=%s",
-        session_id,
+        "收到 session 详情请求 sandbox_id=%s opencode_session_id=%s 来源IP=%s",
+        sandbox_id,
         oc_id,
         request.remote_addr,
     )
     try:
-        exported = export_opencode_session(session_id, oc_id)
+        exported = export_opencode_session(sandbox_id, oc_id)
     except SandboxSessionNotFoundError as exc:
         logger.warning(
-            "session 详情失败：沙箱不存在 session_id=%s 错误=%s",
-            session_id,
+            "session 详情失败：沙箱不存在 sandbox_id=%s 错误=%s",
+            sandbox_id,
             exc,
         )
         return jsonify({"error": str(exc)}), 404
     except OpenCodeError as exc:
         logger.warning(
-            "session 详情失败 session_id=%s opencode_session_id=%s 错误=%s",
-            session_id,
+            "session 详情失败 sandbox_id=%s opencode_session_id=%s 错误=%s",
+            sandbox_id,
             oc_id,
             preview(exc, 500),
         )
         return jsonify({"error": str(exc)}), 502
     return jsonify(
         {
-            "session_id": session_id,
+            "sandbox_id": sandbox_id,
             "opencode_session_id": oc_id,
             "export": exported,
         }

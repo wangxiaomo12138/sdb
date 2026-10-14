@@ -1,6 +1,6 @@
 # Flask + AIO Sandbox OpenCode 异步代理
 
-Python 3.10 Flask 服务：按 `session_id` 复用第三方沙箱与 OpenCode 会话，支持多轮对话；主路径以 SSE 流式输出，并保留异步任务轮询。
+Python 3.10 Flask 服务：按 `sandbox_id` 复用第三方沙箱与 OpenCode 会话，支持多轮对话；主路径以 SSE 流式输出，并保留异步任务轮询。
 
 ## 架构
 
@@ -8,13 +8,13 @@ Python 3.10 Flask 服务：按 `session_id` 复用第三方沙箱与 OpenCode �
 Client -> POST /api/sandbox/session (SSE 建环境)
        -> POST /api/chat (SSE) 或 POST /api/query (异步轮询)
        -> GET /api/sessions 列表 / GET /api/sessions/<id> 详情
-       -> SessionSandboxManager（session_id -> sandboxId）
+       -> SessionSandboxManager（sandbox_id -> 沙箱绑定）
        -> APIG create/refresh 沙箱实例（仅环境创建路径）
        -> agent-sandbox / docker exec
        -> opencode run|session list|export（run 可选 --session）
 ```
 
-任务与 session 映射保存在进程内存中，**服务重启后会丢失**。提问前须先创建环境。
+任务与 sandbox 映射保存在进程内存中，**服务重启后会丢失**。提问前须先创建环境。
 
 ## 环境要求
 
@@ -39,7 +39,7 @@ python run.py
 gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 ```
 
-> 注意：任务存储与 session 映射在进程内，gunicorn 请使用 `-w 1`。
+> 注意：任务存储与 sandbox 映射在进程内，gunicorn 请使用 `-w 1`。
 
 ## 配置
 
@@ -84,7 +84,7 @@ SDK 运行时还会自动注入 `x-livefunction-sandbox-id: <sandboxId>`。
 
 ### 远程排查日志
 
-日志为中文说明 + 关键字段（`session_id` / `sandbox_id` / `任务ID` / 耗时），密钥已脱敏，长文本自动截断。隔离网环境建议：
+日志为中文说明 + 关键字段（`sandbox_id` / `sandbox_id` / `任务ID` / 耗时），密钥已脱敏，长文本自动截断。隔离网环境建议：
 
 ```bash
 # .env
@@ -107,30 +107,30 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -d '{"sub_path":"users/u-1001"}'
 ```
 
-结束事件：`{"type":"ready","session_id":"<服务端生成>"}`。必传 `sub_path`（用户 NAS 隔离）；可选 `skill_file`（HTTP(S) URL，多个用英文逗号分隔）。沙箱模板 ID 用配置。**不要传 `session_id`。**
+结束事件：`{"type":"ready","sandbox_id":"<APIG sandboxId>"}`。必传 `sub_path`（用户 NAS 隔离）；可选 `skill_file`（HTTP(S) URL，多个用英文逗号分隔）。沙箱模板 ID 用配置。**不要自行传 sandbox_id。**
 
 ### `POST /api/chat`（推荐，SSE 流式）
 
 ```bash
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1","query":"用一句话介绍 Python"}'
+  -d '{"sandbox_id":"sbx-xxxx","query":"用一句话介绍 Python"}'
 ```
 
-SSE `data` 为 JSON：`status` / `delta` / `done` / `error`。`done` 含 `opencode_session_id`。续聊时在请求体加 `"opencode_session_id":"ses_xxx"`；不传则开新对话。session 未创建或已过期会直接 `error`。
+SSE `data` 为 JSON：`status` / `delta` / `done` / `error`。`done` 含 `opencode_session_id`。续聊时在请求体加 `"opencode_session_id":"ses_xxx"`；不传则开新对话。沙箱未创建或已过期会直接 `error`。
 
 ### `POST /api/query`（异步轮询，非流式）
 
 ```bash
 curl -X POST http://127.0.0.1:5000/api/query \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"user-1","query":"用一句话介绍 Python"}'
+  -d '{"sandbox_id":"sbx-xxxx","query":"用一句话介绍 Python"}'
 ```
 
 `202` 响应：
 
 ```json
-{"task_id":"...","session_id":"user-1","status":"pending"}
+{"task_id":"...","sandbox_id":"sbx-xxxx","status":"pending"}
 ```
 
 ### `GET /api/tasks/<task_id>`
@@ -144,11 +144,11 @@ curl http://127.0.0.1:5000/api/tasks/<task_id>
 ### `GET /api/sessions` / `GET /api/sessions/<opencode_session_id>`
 
 ```bash
-curl 'http://127.0.0.1:5000/api/sessions?session_id=user-1'
-curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?session_id=user-1'
+curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=sbx-xxxx'
+curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?sandbox_id=sbx-xxxx'
 ```
 
-列表对应 `opencode session list --format json`；详情对应 `opencode export <id>`。均需业务 `session_id` 定位沙箱。
+列表对应 `opencode session list --format json`；详情对应 `opencode export <id>`。均需 `sandbox_id` 定位沙箱。
 
 ### `GET /health`
 
@@ -157,10 +157,10 @@ curl http://127.0.0.1:5000/health
 curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 ```
 
-## Session 语义
+## ID 语义
 
-- 业务 `session_id`：由环境创建接口在 `ready` 事件中下发，绑定沙箱实例
+- `sandbox_id`：APIG `sandboxId`（经建环境 `ready` 下发；Docker 为 `docker:{uuid}`）
 - `opencode_session_id`：由 chat/query 的 `done` / 任务结果回传；客户端可选传入以续聊，不传则开新对话
-- 同一业务 `session_id` → 同一沙箱；同一沙箱内可有多条 OpenCode 对话
+- 同一 `sandbox_id` → 同一沙箱；同一沙箱内可有多条 OpenCode 对话
 - 沙箱默认 900s 后过期销毁；**环境创建或提问执行中**，且剩余时间进入安全窗口（默认 120s）时才 refresh 续期
 - 空闲到期后提问会失败，需重新调用 `/api/sandbox/session`（OpenCode 会话不保留）

@@ -20,7 +20,7 @@ def _utc_now_iso() -> str:
 class Task:
     task_id: str
     query: str
-    session_id: str
+    sandbox_id: str
     status: str = "pending"  # pending | running | succeeded | failed
     answer: Optional[str] = None
     error: Optional[str] = None
@@ -45,23 +45,23 @@ class TaskStore:
     def create(
         self,
         query: str,
-        session_id: str,
+        sandbox_id: str,
         opencode_session_id: Optional[str] = None,
     ) -> Task:
         task = Task(
             task_id=str(uuid.uuid4()),
             query=query,
-            session_id=session_id,
+            sandbox_id=sandbox_id,
             opencode_session_id=opencode_session_id,
         )
         with self._lock:
             self._tasks[task.task_id] = task
             total = len(self._tasks)
         logger.info(
-            "任务已创建 任务ID=%s session_id=%s opencode_session_id=%s "
+            "任务已创建 任务ID=%s sandbox_id=%s opencode_session_id=%s "
             "状态=pending 当前任务数=%s 问题=%s",
             task.task_id,
-            session_id,
+            sandbox_id,
             opencode_session_id or "(new)",
             total,
             preview(query),

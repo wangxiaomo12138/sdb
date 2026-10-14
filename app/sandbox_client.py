@@ -31,11 +31,11 @@ class OpenCodeError(Exception):
 
 
 class SandboxSessionNotFoundError(OpenCodeError):
-    """业务 session 对应的沙箱不存在或已过期。"""
+    """sandbox_id 对应的沙箱不存在或已过期。"""
 
 
-_SANDBOX_SESSION_MISSING = (
-    "sandbox session not found or expired; "
+_SANDBOX_MISSING = (
+    "sandbox not found or expired; "
     "create via POST /api/sandbox/session first"
 )
 
@@ -785,44 +785,43 @@ def status_event(stage: str, message: str) -> dict[str, Any]:
     return {"type": "status", "stage": stage, "message": message}
 
 
-def _require_active_binding(session_id: str) -> SessionSandboxBinding:
-    binding = session_sandbox_manager.get_active(session_id)
+def _require_active_binding(sandbox_id: str) -> SessionSandboxBinding:
+    binding = session_sandbox_manager.get_active(sandbox_id)
     if binding is None:
-        raise SandboxSessionNotFoundError(_SANDBOX_SESSION_MISSING)
+        raise SandboxSessionNotFoundError(_SANDBOX_MISSING)
     return binding
 
 
 def _run_opencode_cli(
-    session_id: str,
+    sandbox_id: str,
     cli_tail: str,
     *,
     timeout: float = 60.0,
 ) -> str:
-    """在业务 session 对应沙箱内执行 opencode CLI（先注入 SANDBOX_ENV_VARS）。"""
-    binding = _require_active_binding(session_id)
+    """在 sandbox_id 对应沙箱内执行 opencode CLI（先注入 SANDBOX_ENV_VARS）。"""
+    binding = _require_active_binding(sandbox_id)
     parts = _opencode_env_exports()
     parts.append(cli_tail)
     command = "; ".join(parts)
     logger.info(
-        "OpenCode CLI 开始 session_id=%s sandbox_id=%s 超时秒=%s 命令=%s",
-        session_id,
-        binding.sandbox_id,
+        "OpenCode CLI 开始 sandbox_id=%s 超时秒=%s 命令=%s",
+        sandbox_id,
         timeout,
         preview(command, 300),
     )
     logger.info("OpenCode CLI 命令原样(可复制调试)\n%s", command)
-    session_sandbox_manager.begin_task(session_id)
+    session_sandbox_manager.begin_task(sandbox_id)
     try:
         return run_sandbox_command(
             command, sandbox_id=binding.sandbox_id, timeout=timeout
         )
     finally:
-        session_sandbox_manager.end_task(session_id)
+        session_sandbox_manager.end_task(sandbox_id)
 
 
-def list_opencode_sessions(session_id: str) -> Any:
+def list_opencode_sessions(sandbox_id: str) -> Any:
     """执行 `opencode session list --format json`，返回解析后的 JSON。"""
-    raw = _run_opencode_cli(session_id, "opencode session list --format json")
+    raw = _run_opencode_cli(sandbox_id, "opencode session list --format json")
     text = raw.strip()
     try:
         return json.loads(text)
@@ -832,10 +831,10 @@ def list_opencode_sessions(session_id: str) -> Any:
         ) from exc
 
 
-def export_opencode_session(session_id: str, opencode_session_id: str) -> Any:
+def export_opencode_session(sandbox_id: str, opencode_session_id: str) -> Any:
     """执行 `opencode export <id>`；能解析为 JSON 则返回对象，否则返回字符串。"""
     cli_tail = f"opencode export {shlex.quote(opencode_session_id)}"
-    raw = _run_opencode_cli(session_id, cli_tail)
+    raw = _run_opencode_cli(sandbox_id, cli_tail)
     text = raw.strip()
     if not text:
         return ""
@@ -848,11 +847,11 @@ def export_opencode_session(session_id: str, opencode_session_id: str) -> Any:
 def stream_opencode(
     query: str,
     *,
-    session_id: str,
+    sandbox_id: str,
     opencode_session_id: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> Generator[dict[str, Any], None, None]:
-    """在已存在的 session 沙箱上执行 opencode，产出对话事件。
+    """在已存在的沙箱上执行 opencode，产出对话事件。
 
     事件类型：status | delta | session | done | error
     沙箱不存在或已过期时直接 error，不会自动创建。
@@ -860,9 +859,9 @@ def stream_opencode(
     """
     timeout = Config.OPENCODE_TIMEOUT_SECONDS if timeout is None else timeout
     logger.info(
-        "开始流式执行OpenCode session_id=%s opencode_session_id=%s "
+        "开始流式执行OpenCode sandbox_id=%s opencode_session_id=%s "
         "超时秒=%s 问题=%s",
-        session_id,
+        sandbox_id,
         opencode_session_id or "(new)",
         timeout,
         preview(query),
@@ -870,33 +869,33 @@ def stream_opencode(
     yield status_event("request_received", "接收到用户请求")
     yield status_event("checking_sandbox", "检查沙箱状态")
 
-    binding = session_sandbox_manager.get_active(session_id)
+    binding = session_sandbox_manager.get_active(sandbox_id)
     if binding is None:
         logger.error(
-            "提问时沙箱不可用 session_id=%s 错误=%s",
-            session_id,
-            _SANDBOX_SESSION_MISSING,
+            "提问时沙箱不可用 sandbox_id=%s 错误=%s",
+            sandbox_id,
+            _SANDBOX_MISSING,
         )
-        yield {"type": "error", "message": _SANDBOX_SESSION_MISSING}
+        yield {"type": "error", "message": _SANDBOX_MISSING}
         return
 
     yield status_event("processing", "正在处理请求")
-    session_sandbox_manager.begin_task(session_id)
+    session_sandbox_manager.begin_task(sandbox_id)
     try:
         yield from _stream_opencode_bound(
             query,
-            session_id,
+            sandbox_id,
             binding,
             timeout,
             request_opencode_session_id=opencode_session_id,
         )
     finally:
-        session_sandbox_manager.end_task(session_id)
+        session_sandbox_manager.end_task(sandbox_id)
 
 
 def _stream_opencode_bound(
     query: str,
-    session_id: str,
+    sandbox_id: str,
     binding: SessionSandboxBinding,
     timeout: float,
     *,
@@ -910,10 +909,9 @@ def _stream_opencode_bound(
     errored = False
     started = time.monotonic()
     logger.info(
-        "已绑定沙箱准备执行 session_id=%s sandbox_id=%s "
+        "已绑定沙箱准备执行 sandbox_id=%s "
         "opencode_session_id=%s 超时秒=%s",
-        session_id,
-        binding.sandbox_id,
+        sandbox_id,
         opencode_session_id or "(新建)",
         timeout,
     )
@@ -932,7 +930,7 @@ def _stream_opencode_bound(
             if event["type"] == "session":
                 resolved_opencode_session_id = event["opencode_session_id"]
                 session_sandbox_manager.set_opencode_session_id(
-                    session_id, resolved_opencode_session_id
+                    sandbox_id, resolved_opencode_session_id
                 )
                 continue
             if event["type"] == "delta":
@@ -943,12 +941,11 @@ def _stream_opencode_bound(
                 errored = True
                 # 续聊失败则清掉 OpenCode session 缓存
                 if opencode_session_id:
-                    session_sandbox_manager.clear_opencode_session_id(session_id)
+                    session_sandbox_manager.clear_opencode_session_id(sandbox_id)
                 logger.warning(
-                    "流式OpenCode返回错误 session_id=%s sandbox_id=%s "
+                    "流式OpenCode返回错误 sandbox_id=%s "
                     "耗时毫秒=%.1f 消息=%s",
-                    session_id,
-                    binding.sandbox_id,
+                    sandbox_id,
                     (time.monotonic() - started) * 1000,
                     preview(event.get("message"), 500),
                 )
@@ -957,10 +954,9 @@ def _stream_opencode_bound(
             if event["type"] == "done":
                 answer = event.get("answer") or answer
                 logger.info(
-                    "流式OpenCode完成 session_id=%s sandbox_id=%s "
+                    "流式OpenCode完成 sandbox_id=%s "
                     "opencode_session_id=%s 耗时毫秒=%.1f 回复字符数=%s",
-                    session_id,
-                    binding.sandbox_id,
+                    sandbox_id,
                     resolved_opencode_session_id or "(无)",
                     (time.monotonic() - started) * 1000,
                     len(answer or ""),
@@ -969,12 +965,11 @@ def _stream_opencode_bound(
                 return
     except OpenCodeError as exc:
         if opencode_session_id:
-            session_sandbox_manager.clear_opencode_session_id(session_id)
+            session_sandbox_manager.clear_opencode_session_id(sandbox_id)
         logger.warning(
-            "流式OpenCode异常 session_id=%s sandbox_id=%s "
+            "流式OpenCode异常 sandbox_id=%s "
             "耗时毫秒=%.1f 错误=%s",
-            session_id,
-            binding.sandbox_id,
+            sandbox_id,
             (time.monotonic() - started) * 1000,
             preview(exc, 500),
         )
@@ -982,18 +977,17 @@ def _stream_opencode_bound(
         return
     except Exception as exc:
         logger.exception(
-            "流式OpenCode未预期异常 session_id=%s sandbox_id=%s",
-            session_id,
-            binding.sandbox_id,
+            "流式OpenCode未预期异常 sandbox_id=%s",
+            sandbox_id,
         )
         yield {"type": "error", "message": f"unexpected error: {exc}"}
         return
 
     if not errored:
         logger.info(
-            "流式OpenCode兜底完成 session_id=%s opencode_session_id=%s "
+            "流式OpenCode兜底完成 sandbox_id=%s opencode_session_id=%s "
             "回复字符数=%s 耗时毫秒=%.1f",
-            session_id,
+            sandbox_id,
             resolved_opencode_session_id or "(无)",
             len(answer),
             (time.monotonic() - started) * 1000,
@@ -1004,21 +998,21 @@ def _stream_opencode_bound(
 def run_opencode(
     query: str,
     *,
-    session_id: str,
+    sandbox_id: str,
     opencode_session_id: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> str:
-    """在指定 session 上跑完 OpenCode，返回本轮完整回复文本。"""
+    """在指定沙箱上跑完 OpenCode，返回本轮完整回复文本。"""
     logger.info(
-        "开始同步执行OpenCode session_id=%s opencode_session_id=%s 问题=%s",
-        session_id,
+        "开始同步执行OpenCode sandbox_id=%s opencode_session_id=%s 问题=%s",
+        sandbox_id,
         opencode_session_id or "(new)",
         preview(query),
     )
     answer = ""
     for event in stream_opencode(
         query,
-        session_id=session_id,
+        sandbox_id=sandbox_id,
         opencode_session_id=opencode_session_id,
         timeout=timeout,
     ):
@@ -1027,15 +1021,15 @@ def run_opencode(
         elif event["type"] == "done":
             final = event.get("answer") or answer
             logger.info(
-                "同步OpenCode成功 session_id=%s 回复字符数=%s",
-                session_id,
+                "同步OpenCode成功 sandbox_id=%s 回复字符数=%s",
+                sandbox_id,
                 len(final or ""),
             )
             return final
         elif event["type"] == "error":
             logger.warning(
-                "同步OpenCode失败 session_id=%s 错误=%s",
-                session_id,
+                "同步OpenCode失败 sandbox_id=%s 错误=%s",
+                sandbox_id,
                 preview(event.get("message"), 500),
             )
             raise OpenCodeError(event.get("message") or "opencode failed")

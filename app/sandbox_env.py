@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 _ENV_CMD_TIMEOUT = 300.0
 
 
-def _status(stage: str, message: str, *, session_id: str = "") -> dict[str, Any]:
+def _status(stage: str, message: str, *, sandbox_id: str = "") -> dict[str, Any]:
     logger.info(
-        "沙箱环境初始化阶段 session_id=%s stage=%s message=%s",
-        session_id or "(未分配)",
+        "沙箱环境初始化阶段 sandbox_id=%s stage=%s message=%s",
+        sandbox_id or "(未分配)",
         stage,
         message,
     )
@@ -267,7 +267,7 @@ def stream_create_sandbox_env(
 
     sub_path 由调用方传入，写入用户数据 NAS 的 subPath 以实现用户隔离；
     沙箱 templateId 与 OpenCode NAS 仍使用服务端配置。
-    session_id 由服务端生成，在 ready 事件中返回。
+    ready 返回 APIG sandboxId（Docker 模式为 docker:{uuid}）。
     事件：status | ready | error
     """
     overall_started = time.monotonic()
@@ -287,13 +287,11 @@ def stream_create_sandbox_env(
         yield {"type": "error", "message": msg}
         return
 
-    sid = uuid.uuid4().hex
     x_mounts = Config.build_x_mounts(user_data_subpath=user_subpath)
     logger.info(
-        "开始创建沙箱环境 session_id=%s template_id=%s user_data_subpath=%s "
+        "开始创建沙箱环境 template_id=%s user_data_subpath=%s "
         "skill_file数量=%s skill_file=%s X-mounts=%s "
         "OpenCode提取路径=%s OpenCode存放路径=%s Skill存放路径=%s",
-        sid,
         Config.SANDBOX_TEMPLATE_ID or "(未配置)",
         user_subpath,
         len(skill_urls or []),
@@ -304,50 +302,48 @@ def stream_create_sandbox_env(
         Config.SKILL_FILE_STORE_PATH or "(未配置)",
     )
 
-    yield _status("checking_sandbox", "检查沙箱状态", session_id=sid)
+    yield _status("checking_sandbox", "检查沙箱状态")
 
     try:
-        yield _status("creating_sandbox", "拉起沙箱", session_id=sid)
+        yield _status("creating_sandbox", "拉起沙箱")
         create_started = time.monotonic()
-        binding, created = session_sandbox_manager.create_session_env(
-            sid,
+        binding, created = session_sandbox_manager.create_sandbox_env(
             user_data_subpath=user_subpath,
         )
+        sandbox_id = binding.sandbox_id
         logger.info(
-            "沙箱实例就绪 session_id=%s sandbox_id=%s 新建=%s "
+            "沙箱实例就绪 sandbox_id=%s 新建=%s "
             "user_data_subpath=%s 耗时毫秒=%.1f",
-            sid,
-            binding.sandbox_id,
+            sandbox_id,
             created,
             user_subpath,
             (time.monotonic() - create_started) * 1000,
         )
     except SandboxLifecycleError as exc:
         logger.error(
-            "创建沙箱环境失败 session_id=%s 错误=%s 总耗时毫秒=%.1f",
-            sid,
+            "创建沙箱环境失败 错误=%s 总耗时毫秒=%.1f",
             preview(exc, 500),
             (time.monotonic() - overall_started) * 1000,
         )
         yield {"type": "error", "message": str(exc)}
         return
 
-    session_sandbox_manager.begin_task(sid)
+    session_sandbox_manager.begin_task(sandbox_id)
     try:
-        yield _status("init_opencode", "初始化 opencode 配置", session_id=sid)
+        yield _status(
+            "init_opencode", "初始化 opencode 配置", sandbox_id=sandbox_id
+        )
         try:
-            _copy_opencode_offline(binding.sandbox_id)
-            session_sandbox_manager.mark_opencode_initialized(sid)
+            _copy_opencode_offline(sandbox_id)
+            session_sandbox_manager.mark_opencode_initialized(sandbox_id)
             logger.info(
-                "OpenCode初始化完成 session_id=%s sandbox_id=%s",
-                sid,
-                binding.sandbox_id,
+                "OpenCode初始化完成 sandbox_id=%s",
+                sandbox_id,
             )
         except OpenCodeError as exc:
             logger.error(
-                "OpenCode离线包初始化失败 session_id=%s sandbox_id=%s 错误=%s",
-                sid,
-                binding.sandbox_id,
+                "OpenCode离线包初始化失败 sandbox_id=%s 错误=%s",
+                sandbox_id,
                 preview(exc, 500),
             )
             yield {"type": "error", "message": str(exc)}
@@ -357,21 +353,19 @@ def stream_create_sandbox_env(
             yield _status(
                 "init_skill",
                 f"初始化 skill 配置（共 {len(skill_urls)} 个）",
-                session_id=sid,
+                sandbox_id=sandbox_id,
             )
             try:
-                _download_skill_files(binding.sandbox_id, skill_urls)
+                _download_skill_files(sandbox_id, skill_urls)
                 logger.info(
-                    "Skill初始化完成 session_id=%s sandbox_id=%s 数量=%s",
-                    sid,
-                    binding.sandbox_id,
+                    "Skill初始化完成 sandbox_id=%s 数量=%s",
+                    sandbox_id,
                     len(skill_urls),
                 )
             except OpenCodeError as exc:
                 logger.error(
-                    "Skill初始化失败 session_id=%s sandbox_id=%s 错误=%s",
-                    sid,
-                    binding.sandbox_id,
+                    "Skill初始化失败 sandbox_id=%s 错误=%s",
+                    sandbox_id,
                     preview(exc, 500),
                 )
                 yield {"type": "error", "message": str(exc)}
@@ -380,26 +374,23 @@ def stream_create_sandbox_env(
             yield _status(
                 "init_skill",
                 "跳过初始化 skill 配置（未提供 skill_file）",
-                session_id=sid,
+                sandbox_id=sandbox_id,
             )
             logger.info(
-                "跳过Skill初始化 session_id=%s sandbox_id=%s",
-                sid,
-                binding.sandbox_id,
+                "跳过Skill初始化 sandbox_id=%s",
+                sandbox_id,
             )
 
-        yield _status("sandbox_ready", "沙箱初始化完成", session_id=sid)
+        yield _status("sandbox_ready", "沙箱初始化完成", sandbox_id=sandbox_id)
         logger.info(
-            "沙箱环境就绪 session_id=%s sandbox_id=%s 总耗时毫秒=%.1f",
-            sid,
-            binding.sandbox_id,
+            "沙箱环境就绪 sandbox_id=%s 总耗时毫秒=%.1f",
+            sandbox_id,
             (time.monotonic() - overall_started) * 1000,
         )
-        yield {"type": "ready", "session_id": sid}
+        yield {"type": "ready", "sandbox_id": sandbox_id}
     finally:
-        session_sandbox_manager.end_task(sid)
+        session_sandbox_manager.end_task(sandbox_id)
         logger.info(
-            "沙箱环境初始化占用结束 session_id=%s sandbox_id=%s",
-            sid,
-            binding.sandbox_id,
+            "沙箱环境初始化占用结束 sandbox_id=%s",
+            sandbox_id,
         )

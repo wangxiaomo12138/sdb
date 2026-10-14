@@ -4,16 +4,16 @@ Base URL 默认：`http://127.0.0.1:5000`（以 `.env` 中 `FLASK_HOST` / `FLASK
 
 ## 通用说明
 
-### Session 语义
+### ID 语义
 
 | 概念 | 说明 |
 |------|------|
-| `session_id` | 由 `POST /api/sandbox/session` 的 `ready` 事件返回；后续提问带此 ID，同一值复用同一沙箱 |
+| `sandbox_id` | APIG 返回的沙箱实例 ID（Docker 模式为 `docker:{uuid}`）；由建环境接口 `ready` 下发，后续提问带此 ID |
 | `opencode_session_id` | OpenCode 对话 ID（如 `ses_…`）；chat/query 的 `done` / 任务结果会回传；可选传入以续聊；也可用列表/详情接口查询 |
 
-- 任务状态与 session→沙箱映射均在**进程内存**中，服务重启后丢失
-- gunicorn 请使用 `-w 1`，避免多 worker 导致任务/session 不一致
-- **推荐顺序**：先 `POST /api/sandbox/session` 取得 `session_id` → chat/query → 从 `done` 取 `opencode_session_id` 续聊；可用 `/api/sessions` 列历史、`/api/sessions/<opencode_session_id>` 看详情
+- 任务状态与 sandbox 绑定映射均在**进程内存**中，服务重启后丢失
+- gunicorn 请使用 `-w 1`，避免多 worker 导致任务/沙箱映射不一致
+- **推荐顺序**：先 `POST /api/sandbox/session` 取得 `sandbox_id` → chat/query → 从 `done` 取 `opencode_session_id` 续聊；可用 `/api/sessions` 列历史、`/api/sessions/<opencode_session_id>` 看详情
 
 ### 公共错误
 
@@ -26,7 +26,7 @@ Base URL 默认：`http://127.0.0.1:5000`（以 `.env` 中 `FLASK_HOST` / `FLASK
 或：
 
 ```json
-{"error": "session_id is required and must be a non-empty string"}
+{"error": "sandbox_id is required and must be a non-empty string"}
 ```
 
 ---
@@ -86,7 +86,7 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 
 ### `POST /api/sandbox/session`
 
-创建沙箱：APIG 创建（含双 NAS `x-mounts`）、拷贝 OpenCode 离线包、可选下载 skill。过程以 SSE `status` 推送；**`session_id` 由服务端生成**，在 `ready` 事件中返回，客户端无需也不应传入。
+创建沙箱：APIG 创建（含双 NAS `x-mounts`）、拷贝 OpenCode 离线包、可选下载 skill。过程以 SSE `status` 推送；**`ready` 返回 APIG 的 `sandboxId`**（Docker 模式为 `docker:{uuid}`），客户端无需也不应自行传入。
 
 #### Headers
 
@@ -122,7 +122,7 @@ curl 'http://127.0.0.1:5000/health?probe_sandbox=1'
 | `type` | 字段 | 说明 |
 |--------|------|------|
 | `status` | `stage`, `message` | 环境准备进度节点 |
-| `ready` | `session_id` | 环境就绪，客户端应保存该 `session_id` |
+| `ready` | `sandbox_id` | 环境就绪，客户端应保存该 `sandbox_id` |
 | `error` | `message` | 失败 |
 
 #### `status.stage` 约定
@@ -151,10 +151,10 @@ data: {"type":"status","stage":"init_skill","message":"跳过初始化 skill 配
 
 data: {"type":"status","stage":"sandbox_ready","message":"沙箱初始化完成"}
 
-data: {"type":"ready","session_id":"a1b2c3d4e5f6..."}
+data: {"type":"ready","sandbox_id":"a1b2c3d4e5f6..."}
 ```
 
-客户端应保存 `ready.session_id`，供后续 `/api/chat`、`/api/query` 使用。
+客户端应保存 `ready.sandbox_id`，供后续 `/api/chat`、`/api/query` 使用。
 
 #### 示例
 
@@ -170,11 +170,11 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 ### `POST /api/chat`
 
-同步建立 SSE 连接，在已创建环境的 `session_id` 上对话并流式返回助手文本。
+同步建立 SSE 连接，在已创建环境的 `sandbox_id` 上对话并流式返回助手文本。
 
 - **不传** `opencode_session_id`：开新 OpenCode 对话
 - **传入** `opencode_session_id`：对该 OpenCode 会话续聊
-- **不会自动创建沙箱**；若业务 session 不存在或已过期，返回 `error`，需先调用 `/api/sandbox/session`
+- **不会自动创建沙箱**；若沙箱 不存在或已过期，返回 `error`，需先调用 `/api/sandbox/session`
 
 #### Headers
 
@@ -187,13 +187,13 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 环境创建接口返回的业务会话 ID |
+| `sandbox_id` | string | 是 | 环境创建接口 `ready` 返回的沙箱 ID |
 | `query` | string | 是 | 本轮用户问题，非空 |
 | `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
 
 ```json
 {
-  "session_id": "a1b2c3d4e5f6...",
+  "sandbox_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python"
 }
 ```
@@ -202,7 +202,7 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 ```json
 {
-  "session_id": "a1b2c3d4e5f6...",
+  "sandbox_id": "a1b2c3d4e5f6...",
   "opencode_session_id": "ses_xxx",
   "query": "再给一个代码示例"
 }
@@ -244,27 +244,27 @@ data: {"type":"done","answer":"Python 是一种解释型语言。","opencode_ses
 沙箱未创建示例：
 
 ```
-data: {"type":"error","message":"sandbox session not found or expired; create via POST /api/sandbox/session first"}
+data: {"type":"error","message":"sandbox not found or expired; create via POST /api/sandbox/session first"}
 ```
 
 #### 多轮示例
 
 ```bash
-# 先创建环境，从 SSE ready 事件取出 session_id
+# 先创建环境，从 SSE ready 事件取出 sandbox_id（APIG sandboxId）
 curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
   -H 'Content-Type: application/json' \
   -d '{"sub_path":"users/u-1001"}'
-# 假设得到 session_id=a1b2c3d4e5f6...
+# 假设得到 sandbox_id=sbx-xxxx...
 
 # 第一轮（新开），从 done 取出 opencode_session_id
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"a1b2c3d4e5f6...","query":"用一句话介绍 Python"}'
+  -d '{"sandbox_id":"sbx-xxxx...","query":"用一句话介绍 Python"}'
 
 # 第二轮（显式传入 opencode_session_id 续聊）
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"a1b2c3d4e5f6...","opencode_session_id":"ses_xxx","query":"再给一个代码示例"}'
+  -d '{"sandbox_id":"sbx-xxxx...","opencode_session_id":"ses_xxx","query":"再给一个代码示例"}'
 ```
 
 ---
@@ -287,13 +287,13 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 环境创建接口返回的业务会话 ID |
+| `sandbox_id` | string | 是 | 环境创建接口 `ready` 返回的沙箱 ID |
 | `query` | string | 是 | 用户问题 |
 | `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
 
 ```json
 {
-  "session_id": "a1b2c3d4e5f6...",
+  "sandbox_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python"
 }
 ```
@@ -303,7 +303,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "session_id": "a1b2c3d4e5f6...",
+  "sandbox_id": "a1b2c3d4e5f6...",
   "status": "pending"
 }
 ```
@@ -315,7 +315,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 ```bash
 curl -X POST http://127.0.0.1:5000/api/query \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"a1b2c3d4e5f6...","query":"用一句话介绍 Python"}'
+  -d '{"sandbox_id":"a1b2c3d4e5f6...","query":"用一句话介绍 Python"}'
 ```
 
 ---
@@ -336,7 +336,7 @@ curl -X POST http://127.0.0.1:5000/api/query \
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
   "query": "用一句话介绍 Python",
-  "session_id": "user-1",
+  "sandbox_id": "user-1",
   "opencode_session_id": "ses_xxx",
   "status": "succeeded",
   "answer": "Python 是一种解释型、通用的高级编程语言。",
@@ -406,13 +406,13 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `session_id` | string | 是 | 业务 session（定位沙箱） |
+| `sandbox_id` | string | 是 | 建环境返回的沙箱 ID |
 
 #### 成功响应 `200`
 
 ```json
 {
-  "session_id": "a1b2c3d4e5f6...",
+  "sandbox_id": "a1b2c3d4e5f6...",
   "sessions": []
 }
 ```
@@ -423,14 +423,14 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 | HTTP | 说明 |
 |------|------|
-| `400` | 缺少 `session_id` |
-| `404` | 业务 session 不存在或已过期 |
+| `400` | 缺少 `sandbox_id` |
+| `404` | 沙箱不存在或已过期 |
 | `502` | CLI 执行失败或非 JSON |
 
 #### 示例
 
 ```bash
-curl 'http://127.0.0.1:5000/api/sessions?session_id=a1b2c3d4e5f6...'
+curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=a1b2c3d4e5f6...'
 ```
 
 ---
@@ -446,13 +446,13 @@ curl 'http://127.0.0.1:5000/api/sessions?session_id=a1b2c3d4e5f6...'
 | 参数 | 位置 | 必填 | 说明 |
 |------|------|------|------|
 | `opencode_session_id` | path | 是 | OpenCode 会话 ID |
-| `session_id` | query | 是 | 业务 session（定位沙箱） |
+| `sandbox_id` | query | 是 | 建环境返回的沙箱 ID |
 
 #### 成功响应 `200`
 
 ```json
 {
-  "session_id": "a1b2c3d4e5f6...",
+  "sandbox_id": "a1b2c3d4e5f6...",
   "opencode_session_id": "ses_xxx",
   "export": {}
 }
@@ -467,7 +467,7 @@ curl 'http://127.0.0.1:5000/api/sessions?session_id=a1b2c3d4e5f6...'
 #### 示例
 
 ```bash
-curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?session_id=a1b2c3d4e5f6...'
+curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?sandbox_id=a1b2c3d4e5f6...'
 ```
 
 ---
@@ -486,9 +486,9 @@ curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?session_id=a1b2c3d4e5f6...'
 
 ## 调用建议
 
-1. 先调 **`/api/sandbox/session`**，从 `ready` 事件拿到服务端下发的 `session_id`
+1. 先调 **`/api/sandbox/session`**，从 `ready` 事件拿到`sandbox_id`（APIG sandboxId）
 2. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**；从 `done.opencode_session_id` 保存以便续聊
 3. 只需最终完整答案、可接受轮询：用 **`/api/query` + `/api/tasks/<id>`**
 4. 续聊时显式传 `opencode_session_id`；不传则开新对话
 5. 用 **`/api/sessions`** 列历史，用 **`/api/sessions/<id>`** 看详情后再选 ID 续聊
-6. 沙箱过期后需重新创建环境；不要依赖进程重启后的 session / 任务状态
+6. 沙箱过期后需重新创建环境；不要依赖进程重启后的 sandbox / 任务状态
