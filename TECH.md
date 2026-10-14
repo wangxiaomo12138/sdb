@@ -101,7 +101,7 @@ app/
 ### 4.4 Session 列表与详情
 
 1. `GET /api/sessions?sandbox_id=…` → `export SANDBOX_ENV_VARS…; opencode session list --format json`
-2. `GET /api/sessions/<opencode_session_id>?sandbox_id=…` → `opencode export <id>`
+2. `GET /api/sessions/detail?sandbox_id=…&opencode_session_id=…` → `opencode export <id>`
 3. 均经 `get_active` + `begin_task` / `end_task`，与 chat 同一沙箱
 
 ### 4.5 两种 Session ID

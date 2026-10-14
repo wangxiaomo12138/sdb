@@ -13,7 +13,7 @@ Base URL 默认：`http://127.0.0.1:5000`（以 `.env` 中 `FLASK_HOST` / `FLASK
 
 - 任务状态与 sandbox 绑定映射均在**进程内存**中，服务重启后丢失
 - gunicorn 请使用 `-w 1`，避免多 worker 导致任务/沙箱映射不一致
-- **推荐顺序**：先 `POST /api/sandbox/session` 取得 `sandbox_id` → chat/query → 从 `done` 取 `opencode_session_id` 续聊；可用 `/api/sessions` 列历史、`/api/sessions/<opencode_session_id>` 看详情
+- **推荐顺序**：先 `POST /api/sandbox/session` 取得 `sandbox_id` → chat/query → 从 `done` 取 `opencode_session_id` 续聊；可用 `/api/sessions` 列历史、`/api/sessions/detail` 看详情
 
 ### 公共错误
 
@@ -437,16 +437,16 @@ curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=a1b2c3d4e5f6...'
 
 ## 7. OpenCode Session 详情
 
-### `GET /api/sessions/<opencode_session_id>`
+### `GET /api/sessions/detail`
 
 在已绑定沙箱内执行 `opencode export <opencode_session_id>`（执行前注入 `SANDBOX_ENV_VARS`）。
 
-#### 路径 / Query
+#### Query 参数
 
-| 参数 | 位置 | 必填 | 说明 |
+| 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `opencode_session_id` | path | 是 | OpenCode 会话 ID |
-| `sandbox_id` | query | 是 | 建环境返回的沙箱 ID |
+| `sandbox_id` | string | 是 | 建环境返回的沙箱 ID |
+| `opencode_session_id` | string | 是 | OpenCode 会话 ID |
 
 #### 成功响应 `200`
 
@@ -462,12 +462,12 @@ curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=a1b2c3d4e5f6...'
 
 #### 错误
 
-与列表接口相同（`400` / `404` / `502`）。
+与列表接口相同（`400` / `404` / `502`）；缺少 `opencode_session_id` 时亦为 `400`。
 
 #### 示例
 
 ```bash
-curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?sandbox_id=a1b2c3d4e5f6...'
+curl 'http://127.0.0.1:5000/api/sessions/detail?sandbox_id=a1b2c3d4e5f6...&opencode_session_id=ses_xxx'
 ```
 
 ---
@@ -482,7 +482,7 @@ curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?sandbox_id=a1b2c3d4e5f6...'
 | `POST` | `/api/query` | 异步提交（非流式） |
 | `GET` | `/api/tasks/<task_id>` | 查询异步任务结果与进度 |
 | `GET` | `/api/sessions` | OpenCode 历史 session 列表 |
-| `GET` | `/api/sessions/<opencode_session_id>` | OpenCode session 聊天详情（export） |
+| `GET` | `/api/sessions/detail` | OpenCode session 聊天详情（export） |
 
 ## 调用建议
 
@@ -490,5 +490,5 @@ curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?sandbox_id=a1b2c3d4e5f6...'
 2. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**；从 `done.opencode_session_id` 保存以便续聊
 3. 只需最终完整答案、可接受轮询：用 **`/api/query` + `/api/tasks/<id>`**
 4. 续聊时显式传 `opencode_session_id`；不传则开新对话
-5. 用 **`/api/sessions`** 列历史，用 **`/api/sessions/<id>`** 看详情后再选 ID 续聊
+5. 用 **`/api/sessions`** 列历史，用 **`/api/sessions/detail`** 看详情后再选 ID 续聊
 6. 沙箱过期后需重新创建环境；不要依赖进程重启后的 sandbox / 任务状态

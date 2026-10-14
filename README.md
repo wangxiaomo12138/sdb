@@ -7,7 +7,7 @@ Python 3.10 Flask 服务：按 `sandbox_id` 复用第三方沙箱与 OpenCode �
 ```
 Client -> POST /api/sandbox/session (SSE 建环境)
        -> POST /api/chat (SSE) 或 POST /api/query (异步轮询)
-       -> GET /api/sessions 列表 / GET /api/sessions/<id> 详情
+       -> GET /api/sessions 列表 / GET /api/sessions/detail 详情
        -> SessionSandboxManager（sandbox_id -> 沙箱绑定）
        -> APIG create/refresh 沙箱实例（仅环境创建路径）
        -> agent-sandbox / docker exec
@@ -141,14 +141,14 @@ curl http://127.0.0.1:5000/api/tasks/<task_id>
 
 `status`：`pending` | `running` | `succeeded` | `failed`；另含 `opencode_session_id`、`current_stage` / `stages`。
 
-### `GET /api/sessions` / `GET /api/sessions/<opencode_session_id>`
+### `GET /api/sessions` / `GET /api/sessions/detail`
 
 ```bash
 curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=sbx-xxxx'
-curl 'http://127.0.0.1:5000/api/sessions/ses_xxx?sandbox_id=sbx-xxxx'
+curl 'http://127.0.0.1:5000/api/sessions/detail?sandbox_id=sbx-xxxx&opencode_session_id=ses_xxx'
 ```
 
-列表对应 `opencode session list --format json`；详情对应 `opencode export <id>`。均需 `sandbox_id` 定位沙箱。
+列表对应 `opencode session list --format json`；详情对应 `opencode export <id>`。均用 query 传 `sandbox_id`（详情另需 `opencode_session_id`）。
 
 ### `GET /health`
 

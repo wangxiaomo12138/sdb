@@ -390,11 +390,23 @@ def list_sessions():
     return jsonify({"sandbox_id": sandbox_id, "sessions": sessions})
 
 
-@api_bp.get("/api/sessions/<opencode_session_id>")
-def get_session_export(opencode_session_id: str):
-    """导出指定 OpenCode session 聊天详情（opencode export）。"""
-    oc_id = (opencode_session_id or "").strip()
-    if not oc_id:
+@api_bp.get("/api/sessions/detail")
+def get_session_export():
+    """导出指定 OpenCode session 聊天详情（opencode export）。
+
+    Query：sandbox_id、opencode_session_id（均为必填）。
+    """
+    parsed = _require_query_sandbox_id()
+    if not isinstance(parsed, str):
+        return parsed
+    sandbox_id = parsed
+
+    oc_raw = request.args.get("opencode_session_id")
+    if not isinstance(oc_raw, str) or not oc_raw.strip():
+        logger.warning(
+            "请求参数校验失败 原因=缺少opencode_session_id 路径=%s",
+            request.path,
+        )
         return (
             jsonify(
                 {
@@ -406,10 +418,8 @@ def get_session_export(opencode_session_id: str):
             ),
             400,
         )
-    parsed = _require_query_sandbox_id()
-    if not isinstance(parsed, str):
-        return parsed
-    sandbox_id = parsed
+    oc_id = oc_raw.strip()
+
     logger.info(
         "收到 session 详情请求 sandbox_id=%s opencode_session_id=%s 来源IP=%s",
         sandbox_id,
