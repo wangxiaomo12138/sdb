@@ -14,6 +14,7 @@ from app.sandbox_client import (
     SandboxSessionNotFoundError,
     check_sandbox_health,
     export_opencode_session,
+    list_opencode_models,
     list_opencode_sessions,
     stream_opencode,
 )
@@ -27,35 +28,43 @@ api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
 
 
-def _parse_optional_opencode_session_id(
+def _parse_optional_string_field(
     body: dict,
+    field: str,
 ) -> Union[Optional[str], Tuple[None, Tuple[Response, int]]]:
-    raw = body.get("opencode_session_id")
+    raw = body.get(field)
     if raw is None:
         return None
     if not isinstance(raw, str):
         logger.warning(
-            "请求参数校验失败 原因=opencode_session_id类型错误 路径=%s",
+            "请求参数校验失败 原因=%s类型错误 路径=%s",
+            field,
             request.path,
         )
         return None, (
-            jsonify(
-                {
-                    "error": (
-                        "opencode_session_id must be a string when provided"
-                    )
-                }
-            ),
+            jsonify({"error": f"{field} must be a string when provided"}),
             400,
         )
     stripped = raw.strip()
     return stripped or None
 
 
+def _parse_optional_opencode_session_id(
+    body: dict,
+) -> Union[Optional[str], Tuple[None, Tuple[Response, int]]]:
+    return _parse_optional_string_field(body, "opencode_session_id")
+
+
+def _parse_optional_model(
+    body: dict,
+) -> Union[Optional[str], Tuple[None, Tuple[Response, int]]]:
+    return _parse_optional_string_field(body, "model")
+
+
 def _parse_sandbox_query(
     body: dict,
 ) -> Union[
-    Tuple[str, str, Optional[str]],
+    Tuple[str, str, Optional[str], Optional[str]],
     Tuple[None, Tuple[Response, int]],
 ]:
     query = body.get("query")
@@ -83,7 +92,10 @@ def _parse_sandbox_query(
     oc = _parse_optional_opencode_session_id(body)
     if isinstance(oc, tuple):
         return oc
-    return sandbox_id.strip(), query.strip(), oc
+    model = _parse_optional_model(body)
+    if isinstance(model, tuple):
+        return model
+    return sandbox_id.strip(), query.strip(), oc, model
 
 
 def _require_query_sandbox_id() -> Union[str, Tuple[Response, int]]:
@@ -218,13 +230,14 @@ def chat():
     if parsed[0] is None:
         err_resp, status = parsed[1]  # type: ignore[misc]
         return err_resp, status
-    sandbox_id, query, opencode_session_id = parsed  # type: ignore[misc]
+    sandbox_id, query, opencode_session_id, model = parsed  # type: ignore[misc]
     logger.info(
         "收到流式对话请求 请求ID=%s sandbox_id=%s opencode_session_id=%s "
-        "问题=%s 来源IP=%s",
+        "model=%s 问题=%s 来源IP=%s",
         req_id,
         sandbox_id,
         opencode_session_id or "(new)",
+        model or "(default)",
         preview(query),
         request.remote_addr,
     )
@@ -244,6 +257,7 @@ def chat():
                 query,
                 sandbox_id=sandbox_id,
                 opencode_session_id=opencode_session_id,
+                model=model,
             ):
                 etype = event.get("type") or "other"
                 if etype == "delta":
@@ -309,7 +323,7 @@ def create_query():
     if parsed[0] is None:
         err_resp, status = parsed[1]  # type: ignore[misc]
         return err_resp, status
-    sandbox_id, query, opencode_session_id = parsed  # type: ignore[misc]
+    sandbox_id, query, opencode_session_id, model = parsed  # type: ignore[misc]
 
     store = current_app.extensions["task_store"]
     worker = current_app.extensions["task_worker"]
@@ -318,6 +332,7 @@ def create_query():
         query,
         sandbox_id=sandbox_id,
         opencode_session_id=opencode_session_id,
+        model=model,
     )
     # 提交前先快照：worker 可能立刻改同一 Task 对象
     payload = {
@@ -327,12 +342,15 @@ def create_query():
     }
     if opencode_session_id:
         payload["opencode_session_id"] = opencode_session_id
+    if model:
+        payload["model"] = model
     logger.info(
         "异步查询已受理 任务ID=%s sandbox_id=%s opencode_session_id=%s "
-        "问题=%s 来源IP=%s",
+        "model=%s 问题=%s 来源IP=%s",
         task.task_id,
         sandbox_id,
         opencode_session_id or "(new)",
+        model or "(default)",
         preview(query),
         request.remote_addr,
     )
@@ -357,6 +375,56 @@ def get_task(task_id: str):
         task.current_stage,
     )
     return jsonify(task.to_dict())
+
+
+@api_bp.get("/api/models")
+def list_models():
+    """列出沙箱内指定 provider 的模型（opencode models <provider>）。"""
+    parsed = _require_query_sandbox_id()
+    if not isinstance(parsed, str):
+        return parsed
+    sandbox_id = parsed
+
+    provider_raw = request.args.get("provider")
+    if not isinstance(provider_raw, str) or not provider_raw.strip():
+        logger.warning(
+            "请求参数校验失败 原因=缺少provider 路径=%s",
+            request.path,
+        )
+        return (
+            jsonify(
+                {"error": "provider is required and must be a non-empty string"}
+            ),
+            400,
+        )
+    provider = provider_raw.strip()
+
+    logger.info(
+        "收到模型列表请求 sandbox_id=%s provider=%s 来源IP=%s",
+        sandbox_id,
+        provider,
+        request.remote_addr,
+    )
+    try:
+        models = list_opencode_models(sandbox_id, provider)
+    except SandboxSessionNotFoundError as exc:
+        logger.warning(
+            "模型列表失败：沙箱不存在 sandbox_id=%s 错误=%s",
+            sandbox_id,
+            exc,
+        )
+        return jsonify({"error": str(exc)}), 404
+    except OpenCodeError as exc:
+        logger.warning(
+            "模型列表失败 sandbox_id=%s provider=%s 错误=%s",
+            sandbox_id,
+            provider,
+            preview(exc, 500),
+        )
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(
+        {"sandbox_id": sandbox_id, "provider": provider, "models": models}
+    )
 
 
 @api_bp.get("/api/sessions")

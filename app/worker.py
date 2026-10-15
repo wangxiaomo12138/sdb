@@ -35,10 +35,12 @@ class TaskWorker:
             return
 
         logger.info(
-            "开始执行任务 任务ID=%s sandbox_id=%s opencode_session_id=%s 问题=%s",
+            "开始执行任务 任务ID=%s sandbox_id=%s opencode_session_id=%s "
+            "model=%s 问题=%s",
             task_id,
             task.sandbox_id,
             task.opencode_session_id or "(new)",
+            task.model or "(default)",
             preview(task.query),
         )
         self.store.mark_running(task_id)
@@ -49,6 +51,7 @@ class TaskWorker:
                 task.query,
                 sandbox_id=task.sandbox_id,
                 opencode_session_id=task.opencode_session_id,
+                model=task.model,
             ):
                 etype = event.get("type")
                 if etype == "status":

@@ -126,11 +126,14 @@ def _opencode_env_exports() -> list[str]:
 
 
 def _build_opencode_command(
-    query: str, *, opencode_session_id: Optional[str] = None
+    query: str,
+    *,
+    opencode_session_id: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> str:
     quoted = shlex.quote(query)
-    model = shlex.quote(Config.OPENCODE_MODEL) if Config.OPENCODE_MODEL else ""
-    model_flag = f"-m {model} " if model else ""
+    resolved_model = model or Config.OPENCODE_MODEL or ""
+    model_flag = f"-m {shlex.quote(resolved_model)} " if resolved_model else ""
     session_flag = ""
     if opencode_session_id:
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
@@ -142,7 +145,7 @@ def _build_opencode_command(
     command = "; ".join(parts)
     logger.info(
         "已构建OpenCode命令 模型=%s opencode_session_id=%s 问题=%s",
-        Config.OPENCODE_MODEL or "(default)",
+        resolved_model or "(default)",
         opencode_session_id or "(new)",
         preview(query),
     )
@@ -844,11 +847,22 @@ def export_opencode_session(sandbox_id: str, opencode_session_id: str) -> Any:
         return text
 
 
+def list_opencode_models(sandbox_id: str, provider: str) -> list[str]:
+    """执行 `opencode models <provider>`，返回模型 ID 行列表。"""
+    cli_tail = f"opencode models {shlex.quote(provider)}"
+    raw = _run_opencode_cli(sandbox_id, cli_tail)
+    text = raw.strip()
+    if not text:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
 def stream_opencode(
     query: str,
     *,
     sandbox_id: str,
     opencode_session_id: Optional[str] = None,
+    model: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> Generator[dict[str, Any], None, None]:
     """在已存在的沙箱上执行 opencode，产出对话事件。
@@ -856,13 +870,15 @@ def stream_opencode(
     事件类型：status | delta | session | done | error
     沙箱不存在或已过期时直接 error，不会自动创建。
     传入 opencode_session_id 则续聊；不传则开新对话（不用服务端缓存自动续聊）。
+    model 有值则覆盖 OPENCODE_MODEL。
     """
     timeout = Config.OPENCODE_TIMEOUT_SECONDS if timeout is None else timeout
     logger.info(
         "开始流式执行OpenCode sandbox_id=%s opencode_session_id=%s "
-        "超时秒=%s 问题=%s",
+        "model=%s 超时秒=%s 问题=%s",
         sandbox_id,
         opencode_session_id or "(new)",
+        model or Config.OPENCODE_MODEL or "(default)",
         timeout,
         preview(query),
     )
@@ -888,6 +904,7 @@ def stream_opencode(
             binding,
             timeout,
             request_opencode_session_id=opencode_session_id,
+            model=model,
         )
     finally:
         session_sandbox_manager.end_task(sandbox_id)
@@ -900,11 +917,14 @@ def _stream_opencode_bound(
     timeout: float,
     *,
     request_opencode_session_id: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Generator[dict[str, Any], None, None]:
     # 续聊完全由请求参数决定，不再读取 binding.opencode_session_id
     opencode_session_id = request_opencode_session_id or None
     resolved_opencode_session_id = opencode_session_id
-    command = _build_opencode_command(query, opencode_session_id=opencode_session_id)
+    command = _build_opencode_command(
+        query, opencode_session_id=opencode_session_id, model=model
+    )
     answer = ""
     errored = False
     started = time.monotonic()
@@ -1000,13 +1020,16 @@ def run_opencode(
     *,
     sandbox_id: str,
     opencode_session_id: Optional[str] = None,
+    model: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> str:
     """在指定沙箱上跑完 OpenCode，返回本轮完整回复文本。"""
     logger.info(
-        "开始同步执行OpenCode sandbox_id=%s opencode_session_id=%s 问题=%s",
+        "开始同步执行OpenCode sandbox_id=%s opencode_session_id=%s "
+        "model=%s 问题=%s",
         sandbox_id,
         opencode_session_id or "(new)",
+        model or Config.OPENCODE_MODEL or "(default)",
         preview(query),
     )
     answer = ""
@@ -1014,6 +1037,7 @@ def run_opencode(
         query,
         sandbox_id=sandbox_id,
         opencode_session_id=opencode_session_id,
+        model=model,
         timeout=timeout,
     ):
         if event["type"] == "delta":

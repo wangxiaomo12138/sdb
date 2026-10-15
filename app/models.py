@@ -25,6 +25,7 @@ class Task:
     answer: Optional[str] = None
     error: Optional[str] = None
     opencode_session_id: Optional[str] = None
+    model: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     finished_at: Optional[str] = None
     current_stage: Optional[str] = None
@@ -47,22 +48,25 @@ class TaskStore:
         query: str,
         sandbox_id: str,
         opencode_session_id: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> Task:
         task = Task(
             task_id=str(uuid.uuid4()),
             query=query,
             sandbox_id=sandbox_id,
             opencode_session_id=opencode_session_id,
+            model=model,
         )
         with self._lock:
             self._tasks[task.task_id] = task
             total = len(self._tasks)
         logger.info(
             "任务已创建 任务ID=%s sandbox_id=%s opencode_session_id=%s "
-            "状态=pending 当前任务数=%s 问题=%s",
+            "model=%s 状态=pending 当前任务数=%s 问题=%s",
             task.task_id,
             sandbox_id,
             opencode_session_id or "(new)",
+            model or "(default)",
             total,
             preview(query),
         )

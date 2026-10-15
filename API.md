@@ -190,11 +190,22 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 | `sandbox_id` | string | 是 | 环境创建接口 `ready` 返回的沙箱 ID |
 | `query` | string | 是 | 本轮用户问题，非空 |
 | `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
+| `model` | string | 否 | `provider/model`；有则覆盖服务端 `OPENCODE_MODEL`；空串视为未传 |
 
 ```json
 {
   "sandbox_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python"
+}
+```
+
+指定模型：
+
+```json
+{
+  "sandbox_id": "a1b2c3d4e5f6...",
+  "query": "用一句话介绍 Python",
+  "model": "bailian-token-plan/qwen3.6-plus"
 }
 ```
 
@@ -261,6 +272,11 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"sandbox_id":"sbx-xxxx...","query":"用一句话介绍 Python"}'
 
+# 指定模型
+curl -N -X POST http://127.0.0.1:5000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"sandbox_id":"sbx-xxxx...","query":"用一句话介绍 Python","model":"bailian-token-plan/qwen3.6-plus"}'
+
 # 第二轮（显式传入 opencode_session_id 续聊）
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
@@ -290,6 +306,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 | `sandbox_id` | string | 是 | 环境创建接口 `ready` 返回的沙箱 ID |
 | `query` | string | 是 | 用户问题 |
 | `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
+| `model` | string | 否 | `provider/model`；有则覆盖服务端 `OPENCODE_MODEL`；空串视为未传 |
 
 ```json
 {
@@ -308,7 +325,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 }
 ```
 
-若请求带了 `opencode_session_id`，`202` 响应会原样带回；最终以任务结果中的值为准。
+若请求带了 `opencode_session_id` 或 `model`，`202` 响应会原样带回；最终以任务结果中的值为准。
 
 #### 示例
 
@@ -396,7 +413,51 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 ---
 
-## 6. OpenCode Session 列表
+## 6. OpenCode 模型列表
+
+### `GET /api/models`
+
+在已绑定沙箱内执行 `opencode models <provider>`（执行前注入 `SANDBOX_ENV_VARS`）。
+
+#### Query 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `sandbox_id` | string | 是 | 建环境返回的沙箱 ID |
+| `provider` | string | 是 | Provider ID，用于过滤模型 |
+
+#### 成功响应 `200`
+
+```json
+{
+  "sandbox_id": "a1b2c3d4e5f6...",
+  "provider": "bailian-token-plan",
+  "models": [
+    "bailian-token-plan/qwen3.6-plus",
+    "bailian-token-plan/qwen3.6-flash"
+  ]
+}
+```
+
+`models` 为 CLI 按行输出的模型 ID 列表（空输出则为 `[]`）。
+
+#### 错误
+
+| HTTP | 说明 |
+|------|------|
+| `400` | 缺少 `sandbox_id` 或 `provider` |
+| `404` | 沙箱不存在或已过期 |
+| `502` | CLI 执行失败 |
+
+#### 示例
+
+```bash
+curl 'http://127.0.0.1:5000/api/models?sandbox_id=a1b2c3d4e5f6...&provider=bailian-token-plan'
+```
+
+---
+
+## 7. OpenCode Session 列表
 
 ### `GET /api/sessions`
 
@@ -435,7 +496,7 @@ curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=a1b2c3d4e5f6...'
 
 ---
 
-## 7. OpenCode Session 详情
+## 8. OpenCode Session 详情
 
 ### `GET /api/sessions/detail`
 
@@ -478,17 +539,19 @@ curl 'http://127.0.0.1:5000/api/sessions/detail?sandbox_id=a1b2c3d4e5f6...&openc
 |------|------|------|
 | `GET` | `/health` | 健康检查 |
 | `POST` | `/api/sandbox/session` | SSE 创建/复用沙箱环境 |
-| `POST` | `/api/chat` | SSE 流式对话（可选 `opencode_session_id` 续聊） |
-| `POST` | `/api/query` | 异步提交（非流式） |
+| `POST` | `/api/chat` | SSE 流式对话（可选 `opencode_session_id` 续聊、可选 `model`） |
+| `POST` | `/api/query` | 异步提交（非流式；可选 `model`） |
 | `GET` | `/api/tasks/<task_id>` | 查询异步任务结果与进度 |
+| `GET` | `/api/models` | OpenCode 指定 provider 的模型列表 |
 | `GET` | `/api/sessions` | OpenCode 历史 session 列表 |
 | `GET` | `/api/sessions/detail` | OpenCode session 聊天详情（export） |
 
 ## 调用建议
 
 1. 先调 **`/api/sandbox/session`**，从 `ready` 事件拿到`sandbox_id`（APIG sandboxId）
-2. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**；从 `done.opencode_session_id` 保存以便续聊
-3. 只需最终完整答案、可接受轮询：用 **`/api/query` + `/api/tasks/<id>`**
-4. 续聊时显式传 `opencode_session_id`；不传则开新对话
-5. 用 **`/api/sessions`** 列历史，用 **`/api/sessions/detail`** 看详情后再选 ID 续聊
-6. 沙箱过期后需重新创建环境；不要依赖进程重启后的 sandbox / 任务状态
+2. 可用 **`/api/models?sandbox_id=&provider=`** 查模型，再在 chat/query 里传 `model`
+3. 需要打字机效果 / 低延迟反馈：用 **`/api/chat`**；从 `done.opencode_session_id` 保存以便续聊
+4. 只需最终完整答案、可接受轮询：用 **`/api/query` + `/api/tasks/<id>`**
+5. 续聊时显式传 `opencode_session_id`；不传则开新对话
+6. 用 **`/api/sessions`** 列历史，用 **`/api/sessions/detail`** 看详情后再选 ID 续聊
+7. 沙箱过期后需重新创建环境；不要依赖进程重启后的 sandbox / 任务状态
