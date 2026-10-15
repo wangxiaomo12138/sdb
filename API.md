@@ -166,7 +166,58 @@ curl -N -X POST http://127.0.0.1:5000/api/sandbox/session \
 
 ---
 
-## 3. 流式对话（推荐）
+## 3. 查询沙箱状态
+
+### `GET /api/sandbox/status`
+
+根据 `sandbox_id` 调用 APIG `GET /livefunction/sandboxes/{sandboxId}`，返回沙箱实例信息与状态。
+
+#### Query 参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `sandbox_id` | string | 是 | APIG 沙箱实例 ID（不支持 `docker:` 本地模式） |
+
+#### 成功响应 `200`
+
+```json
+{
+  "sandbox_id": "a1b2c3d4e5f6...",
+  "template_id": "tpl-xxxx",
+  "timeout": 900,
+  "cpu": 2,
+  "memory": 4096,
+  "status": "running",
+  "start_at": "2026-10-15T09:00:00Z",
+  "ready_time": 1200,
+  "create_client": "10.0.0.1",
+  "x_mounts": []
+}
+```
+
+`status` 取值：`starting` / `running` / `stopped` / `error`。
+
+#### 错误
+
+| HTTP | 说明 |
+|------|------|
+| `400` | 缺少或非法 `sandbox_id` |
+| `404` | 沙箱实例不存在（APIG 业务码 404） |
+| `502` | APIG 调用失败，或其他业务错误 |
+
+```json
+{"error": "沙箱实例不存在"}
+```
+
+#### 示例
+
+```bash
+curl 'http://127.0.0.1:5000/api/sandbox/status?sandbox_id=a1b2c3d4e5f6...'
+```
+
+---
+
+## 4. 流式对话（推荐）
 
 ### `POST /api/chat`
 
@@ -285,7 +336,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 
 ---
 
-## 4. 异步提交查询（非流式）
+## 5. 异步提交查询（非流式）
 
 ### `POST /api/query`
 
@@ -337,7 +388,7 @@ curl -X POST http://127.0.0.1:5000/api/query \
 
 ---
 
-## 5. 查询任务状态
+## 6. 查询任务状态
 
 ### `GET /api/tasks/<task_id>`
 
@@ -413,7 +464,7 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 ---
 
-## 6. OpenCode 模型列表
+## 7. OpenCode 模型列表
 
 ### `GET /api/models`
 
@@ -457,7 +508,7 @@ curl 'http://127.0.0.1:5000/api/models?sandbox_id=a1b2c3d4e5f6...&provider=baili
 
 ---
 
-## 7. OpenCode Session 列表
+## 8. OpenCode Session 列表
 
 ### `GET /api/sessions`
 
@@ -496,7 +547,7 @@ curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=a1b2c3d4e5f6...'
 
 ---
 
-## 8. OpenCode Session 详情
+## 9. OpenCode Session 详情
 
 ### `GET /api/sessions/detail`
 
@@ -539,6 +590,7 @@ curl 'http://127.0.0.1:5000/api/sessions/detail?sandbox_id=a1b2c3d4e5f6...&openc
 |------|------|------|
 | `GET` | `/health` | 健康检查 |
 | `POST` | `/api/sandbox/session` | SSE 创建/复用沙箱环境 |
+| `GET` | `/api/sandbox/status` | 查询 APIG 沙箱实例状态 |
 | `POST` | `/api/chat` | SSE 流式对话（可选 `opencode_session_id` 续聊、可选 `model`） |
 | `POST` | `/api/query` | 异步提交（非流式；可选 `model`） |
 | `GET` | `/api/tasks/<task_id>` | 查询异步任务结果与进度 |

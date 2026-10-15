@@ -23,6 +23,11 @@ from app.sandbox_env import (
     validate_create_env_params,
     validate_skill_file_urls,
 )
+from app.sandbox_lifecycle import (
+    SandboxLifecycleError,
+    SandboxNotFoundError,
+    get_sandbox_status,
+)
 
 api_bp = Blueprint("api", __name__)
 logger = logging.getLogger(__name__)
@@ -135,6 +140,37 @@ def health():
         if not ok:
             return jsonify(payload), 503
     return jsonify(payload)
+
+
+@api_bp.get("/api/sandbox/status")
+def sandbox_status():
+    """查询 APIG 沙箱实例信息与状态（GET /livefunction/sandboxes/{sandboxId}）。"""
+    parsed = _require_query_sandbox_id()
+    if not isinstance(parsed, str):
+        return parsed
+    sandbox_id = parsed
+    logger.info(
+        "收到沙箱状态查询 sandbox_id=%s 来源IP=%s",
+        sandbox_id,
+        request.remote_addr,
+    )
+    try:
+        data = get_sandbox_status(sandbox_id)
+    except SandboxNotFoundError as exc:
+        logger.warning(
+            "沙箱状态查询：实例不存在 sandbox_id=%s 错误=%s",
+            sandbox_id,
+            exc,
+        )
+        return jsonify({"error": str(exc)}), 404
+    except SandboxLifecycleError as exc:
+        logger.warning(
+            "沙箱状态查询失败 sandbox_id=%s 错误=%s",
+            sandbox_id,
+            preview(exc, 500),
+        )
+        return jsonify({"error": str(exc)}), 502
+    return jsonify(data)
 
 
 @api_bp.post("/api/sandbox/session")

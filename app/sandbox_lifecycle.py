@@ -21,7 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 class SandboxLifecycleError(Exception):
-    """APIG 创建、刷新或等待就绪失败时抛出。"""
+    """APIG 创建、刷新、查询或等待就绪失败时抛出。"""
+
+
+class SandboxNotFoundError(SandboxLifecycleError):
+    """APIG 查询沙箱状态时实例不存在（业务码 404）。"""
 
 
 def _apig_headers() -> dict[str, str]:
@@ -242,8 +246,46 @@ class _IPv4HTTPSConnection(http.client.HTTPSConnection):
         )
 
 
-def _apig_post_stdlib(
-    url: str, *, json_body: dict[str, Any], action: str
+def _parse_apig_response_body(
+    status: int,
+    text: str,
+    action: str,
+    *,
+    allow_error_payload: bool = False,
+) -> dict[str, Any]:
+    """解析 APIG JSON 响应；可选择放行带业务码的 4xx 正文（如查询 404）。"""
+    try:
+        payload = json.loads(text) if text else {}
+    except ValueError as exc:
+        if status >= 400:
+            raise SandboxLifecycleError(
+                f"{action} failed: HTTP {status} {preview(text, 500)}"
+            ) from exc
+        raise SandboxLifecycleError(f"{action} invalid JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        if status >= 400:
+            raise SandboxLifecycleError(
+                f"{action} failed: HTTP {status} {preview(text, 500)}"
+            )
+        raise SandboxLifecycleError(f"{action} response is not an object")
+
+    if status >= 400:
+        if allow_error_payload and "code" in payload:
+            return payload
+        raise SandboxLifecycleError(
+            f"{action} failed: HTTP {status} {preview(text, 500)}"
+        )
+    return payload
+
+
+def _apig_request_stdlib(
+    method: str,
+    url: str,
+    *,
+    json_body: Optional[dict[str, Any]] = None,
+    action: str,
+    allow_error_payload: bool = False,
 ) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme != "https":
@@ -264,9 +306,11 @@ def _apig_post_stdlib(
     if parsed.query:
         path = f"{path}?{parsed.query}"
 
-    body_bytes = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
     headers = _apig_headers()
-    headers["Content-Length"] = str(len(body_bytes))
+    body_bytes: Optional[bytes] = None
+    if json_body is not None:
+        body_bytes = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+        headers["Content-Length"] = str(len(body_bytes))
     headers["Host"] = host
 
     connect_s = Config.SANDBOX_APIG_CONNECT_TIMEOUT_SECONDS
@@ -275,9 +319,10 @@ def _apig_post_stdlib(
     verify = Config.apig_ssl_verify()
     ssl_label = verify if isinstance(verify, str) else ("开启" if verify else "关闭")
     logger.info(
-        "创建APIG(stdlib)客户端 动作=%s host=%s port=%s 路径=%s "
+        "创建APIG(stdlib)客户端 动作=%s method=%s host=%s port=%s 路径=%s "
         "连接超时秒=%s 总超时秒=%s SSL校验=%s TLS=%s 兼容套件=%s 优先IPv4=%s",
         action,
+        method,
         host,
         port,
         path,
@@ -297,7 +342,7 @@ def _apig_post_stdlib(
         # 握手后读写改用总超时，避免长响应被连接超时掐断
         if conn.sock is not None:
             conn.sock.settimeout(total_s)
-        conn.request("POST", path, body=body_bytes, headers=headers)
+        conn.request(method.upper(), path, body=body_bytes, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()
         text = raw.decode("utf-8", errors="replace")
@@ -307,23 +352,31 @@ def _apig_post_stdlib(
             resp.status,
             preview(text, 800),
         )
-        if resp.status >= 400:
-            raise SandboxLifecycleError(
-                f"{action} failed: HTTP {resp.status} {preview(text, 500)}"
-            )
-        try:
-            return json.loads(text)
-        except ValueError as exc:
-            raise SandboxLifecycleError(f"{action} invalid JSON: {exc}") from exc
+        return _parse_apig_response_body(
+            resp.status,
+            text,
+            action,
+            allow_error_payload=allow_error_payload,
+        )
     finally:
         conn.close()
 
 
-def _apig_post_httpx(
-    url: str, *, json_body: dict[str, Any], action: str
+def _apig_request_httpx(
+    method: str,
+    url: str,
+    *,
+    json_body: Optional[dict[str, Any]] = None,
+    action: str,
+    allow_error_payload: bool = False,
 ) -> dict[str, Any]:
     with _apig_client() as client:
-        resp = client.post(url, headers=_apig_headers(), json=json_body)
+        resp = client.request(
+            method.upper(),
+            url,
+            headers=_apig_headers(),
+            json=json_body,
+        )
         logger.info(
             "APIG请求完成 动作=%s 后端=httpx HTTP状态码=%s Content-Type=%s 正文=%s",
             action,
@@ -331,8 +384,12 @@ def _apig_post_httpx(
             resp.headers.get("content-type"),
             preview(resp.text, 800),
         )
-        resp.raise_for_status()
-        return resp.json()
+        return _parse_apig_response_body(
+            resp.status_code,
+            resp.text,
+            action,
+            allow_error_payload=allow_error_payload,
+        )
 
 
 class _APIGSSLAdapter(HTTPAdapter):
@@ -347,8 +404,13 @@ class _APIGSSLAdapter(HTTPAdapter):
         return super().proxy_manager_for(*args, **kwargs)
 
 
-def _apig_post_requests(
-    url: str, *, json_body: dict[str, Any], action: str
+def _apig_request_requests(
+    method: str,
+    url: str,
+    *,
+    json_body: Optional[dict[str, Any]] = None,
+    action: str,
+    allow_error_payload: bool = False,
 ) -> dict[str, Any]:
     """默认后端：requests + urllib3，行为更接近 Postman。"""
     verify = Config.apig_ssl_verify()
@@ -367,9 +429,10 @@ def _apig_post_requests(
             pass
 
     logger.info(
-        "创建APIG(requests)客户端 动作=%s 超时=(连接%.1f,总%.1f) SSL校验=%s "
+        "创建APIG(requests)客户端 动作=%s method=%s 超时=(连接%.1f,总%.1f) SSL校验=%s "
         "TLS=%s 兼容套件=%s 优先IPv4=%s TRUST_ENV=%s 代理=%s",
         action,
+        method,
         connect_s,
         total_s,
         ssl_label,
@@ -405,7 +468,8 @@ def _apig_post_requests(
         elif not verify:
             req_verify = False
 
-        resp = session.post(
+        resp = session.request(
+            method.upper(),
             url,
             headers=_apig_headers(),
             json=json_body,
@@ -420,14 +484,12 @@ def _apig_post_requests(
             resp.headers.get("content-type"),
             preview(resp.text, 800),
         )
-        if resp.status_code >= 400:
-            raise SandboxLifecycleError(
-                f"{action} failed: HTTP {resp.status_code} {preview(resp.text, 500)}"
-            )
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise SandboxLifecycleError(f"{action} invalid JSON: {exc}") from exc
+        return _parse_apig_response_body(
+            resp.status_code,
+            resp.text,
+            action,
+            allow_error_payload=allow_error_payload,
+        )
     except requests.RequestException as exc:
         raise SandboxLifecycleError(f"{action} failed: {exc}") from exc
     finally:
@@ -476,19 +538,37 @@ def _backend_fallback_order(primary: str) -> list[str]:
     return [primary] + [b for b in order if b != primary]
 
 
-def _dispatch_apig_post(
-    backend: str, url: str, *, json_body: dict[str, Any], action: str
+def _dispatch_apig_request(
+    backend: str,
+    method: str,
+    url: str,
+    *,
+    json_body: Optional[dict[str, Any]] = None,
+    action: str,
+    allow_error_payload: bool = False,
 ) -> dict[str, Any]:
+    kwargs = {
+        "json_body": json_body,
+        "action": action,
+        "allow_error_payload": allow_error_payload,
+    }
     if backend == "requests":
-        return _apig_post_requests(url, json_body=json_body, action=action)
+        return _apig_request_requests(method, url, **kwargs)
     if backend == "stdlib":
-        return _apig_post_stdlib(url, json_body=json_body, action=action)
+        return _apig_request_stdlib(method, url, **kwargs)
     if backend == "httpx":
-        return _apig_post_httpx(url, json_body=json_body, action=action)
+        return _apig_request_httpx(method, url, **kwargs)
     raise SandboxLifecycleError(f"unknown APIG HTTP backend: {backend}")
 
 
-def _apig_post(url: str, *, json_body: dict[str, Any], action: str) -> dict[str, Any]:
+def _apig_request(
+    method: str,
+    url: str,
+    *,
+    json_body: Optional[dict[str, Any]] = None,
+    action: str,
+    allow_error_payload: bool = False,
+) -> dict[str, Any]:
     _log_env_proxy_hint()
     backend = (Config.SANDBOX_APIG_HTTP_BACKEND or "requests").lower()
     attempts = 3
@@ -499,15 +579,21 @@ def _apig_post(url: str, *, json_body: dict[str, Any], action: str) -> dict[str,
         for i in range(1, attempts + 1):
             try:
                 logger.info(
-                    "APIG发起请求 动作=%s 后端=%s 次数=%s/%s url=%s",
+                    "APIG发起请求 动作=%s method=%s 后端=%s 次数=%s/%s url=%s",
                     action,
+                    method,
                     be,
                     i,
                     attempts,
                     url,
                 )
-                return _dispatch_apig_post(
-                    be, url, json_body=json_body, action=action
+                return _dispatch_apig_request(
+                    be,
+                    method,
+                    url,
+                    json_body=json_body,
+                    action=action,
+                    allow_error_payload=allow_error_payload,
                 )
             except SandboxLifecycleError as exc:
                 last_exc = exc
@@ -576,6 +662,18 @@ def _apig_post(url: str, *, json_body: dict[str, Any], action: str) -> dict[str,
                 raise _wrap_http_error(action, exc) from exc
 
     raise _wrap_http_error(action, last_exc or RuntimeError("unknown APIG error"))
+
+
+def _apig_post(url: str, *, json_body: dict[str, Any], action: str) -> dict[str, Any]:
+    return _apig_request("POST", url, json_body=json_body, action=action)
+
+
+def _apig_get(
+    url: str, *, action: str, allow_error_payload: bool = False
+) -> dict[str, Any]:
+    return _apig_request(
+        "GET", url, action=action, allow_error_payload=allow_error_payload
+    )
 
 
 def _check_response(payload: dict[str, Any], action: str) -> dict[str, Any]:
@@ -677,6 +775,72 @@ def refresh_sandbox(
     return _check_response(payload, "续期沙箱")
 
 
+def _normalize_sandbox_status_data(data: dict[str, Any]) -> dict[str, Any]:
+    """将 APIG data 字段转为本地 snake_case。"""
+    mounts = data.get("x-mounts")
+    if mounts is None:
+        mounts = data.get("X-mounts")
+    return {
+        "sandbox_id": data.get("sandboxId"),
+        "template_id": data.get("templateId"),
+        "timeout": data.get("timeout"),
+        "cpu": data.get("cpu"),
+        "memory": data.get("memory"),
+        "status": data.get("status"),
+        "start_at": data.get("startAt"),
+        "ready_time": data.get("readyTime"),
+        "create_client": data.get("createClient"),
+        "x_mounts": mounts,
+    }
+
+
+def get_sandbox_status(sandbox_id: str) -> dict[str, Any]:
+    """查询沙箱实例信息与状态，返回规范化后的 data 对象。
+
+    实例不存在时抛出 SandboxNotFoundError。
+    Docker 本地模式（sandbox_id 以 docker: 开头）不走 APIG，直接报错。
+    """
+    sid = (sandbox_id or "").strip()
+    if not sid:
+        raise SandboxLifecycleError("sandbox_id is required")
+    if sid.startswith("docker:"):
+        raise SandboxLifecycleError(
+            "sandbox status query via APIG is not available for docker sandboxes"
+        )
+
+    url = f"{_apig_base()}/livefunction/sandboxes/{sid}"
+    logger.info("调用APIG查询沙箱状态 地址=%s sandbox_id=%s", url, sid)
+    with log_step(logger, "APIG查询沙箱状态", sandbox_id=sid):
+        payload = _apig_get(
+            url,
+            action="get sandbox status request",
+            allow_error_payload=True,
+        )
+
+    code = payload.get("code")
+    if code == 404:
+        message = payload.get("message") or "沙箱实例不存在"
+        logger.warning(
+            "APIG沙箱不存在 sandbox_id=%s 消息=%s", sid, preview(message, 300)
+        )
+        raise SandboxNotFoundError(str(message))
+
+    _check_response(payload, "查询沙箱状态")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise SandboxLifecycleError(
+            "get sandbox status response missing data object"
+        )
+
+    normalized = _normalize_sandbox_status_data(data)
+    logger.info(
+        "APIG查询沙箱状态成功 sandbox_id=%s 状态=%s",
+        normalized.get("sandbox_id") or sid,
+        normalized.get("status"),
+    )
+    return normalized
+
+
 def wait_until_running(
     sandbox_id: str,
     *,
@@ -684,7 +848,7 @@ def wait_until_running(
 ) -> str:
     """等待沙箱进入可用状态。
 
-    创建接口可能直接返回 status，文档没有按 id 查询的接口。
+    创建接口可能直接返回 status；也可通过 get_sandbox_status 按 id 查询。
     已是 running（或未返回 status）则立即返回；stopped/error 直接失败。
     starting 时短等一段时间后继续（不调用 refresh，避免无任务时续期）。
     """
