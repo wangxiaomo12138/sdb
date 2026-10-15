@@ -92,6 +92,10 @@ class Config:
         "OPENCODE_OFFLINE_STORE_PATH", ""
     ).strip()
     SKILL_FILE_STORE_PATH = os.getenv("SKILL_FILE_STORE_PATH", "").strip()
+    # 环境初始化（拷贝 OpenCode 离线包、下载 skill）单次命令超时
+    SANDBOX_ENV_INIT_TIMEOUT_SECONDS = float(
+        os.getenv("SANDBOX_ENV_INIT_TIMEOUT_SECONDS", "900")
+    )
 
     # APIG HTTPS：隔离网自签/内网证书可关校验，或指定 CA 文件
     # verify=false 时跳过证书校验；CA_BUNDLE 非空时优先用作 verify 路径

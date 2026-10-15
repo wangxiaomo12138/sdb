@@ -68,6 +68,7 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `OPENCODE_OFFLINE_EXTRACT_PATH` | 空 | 沙箱内离线包提取/源路径 |
 | `OPENCODE_OFFLINE_STORE_PATH` | 空 | 沙箱内离线包存放路径 |
 | `SKILL_FILE_STORE_PATH` | 空 | 沙箱内 skill 存放目录 |
+| `SANDBOX_ENV_INIT_TIMEOUT_SECONDS` | `900` | 环境初始化（拷贝 OpenCode / 下载 skill）单次命令超时 |
 | `SANDBOX_REFRESH_DURATION` | `900` | 有任务且快到期时续期时长（秒，硬上限 1800） |
 | `SANDBOX_KEEPALIVE_MARGIN_SECONDS` | `120` | 剩余 TTL 低于该值才考虑 refresh |
 | `SANDBOX_KEEPALIVE_INTERVAL_SECONDS` | `15` | 保活扫描间隔 |

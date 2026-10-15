@@ -15,9 +15,6 @@ from app.session_sandbox import session_sandbox_manager
 
 logger = logging.getLogger(__name__)
 
-# 环境初始化（拷贝/下载）默认超时
-_ENV_CMD_TIMEOUT = 300.0
-
 
 def _status(stage: str, message: str, *, sandbox_id: str = "") -> dict[str, Any]:
     logger.info(
@@ -80,12 +77,13 @@ def _copy_opencode_offline(sandbox_id: str) -> None:
         )
         return
 
+    timeout = Config.SANDBOX_ENV_INIT_TIMEOUT_SECONDS
     logger.info(
         "开始拷贝OpenCode离线包 sandbox_id=%s extract=%s store=%s 超时秒=%s",
         sandbox_id,
         extract,
         store,
-        _ENV_CMD_TIMEOUT,
+        timeout,
     )
     started = time.monotonic()
     extract_q = shlex.quote(extract)
@@ -97,7 +95,7 @@ def _copy_opencode_offline(sandbox_id: str) -> None:
         f"fi && "
         f"cp -a {extract_q} {store_q}/"
     )
-    run_sandbox_command(command, sandbox_id=sandbox_id, timeout=_ENV_CMD_TIMEOUT)
+    run_sandbox_command(command, sandbox_id=sandbox_id, timeout=timeout)
     logger.info(
         "OpenCode离线包拷贝完成 sandbox_id=%s 耗时毫秒=%.1f",
         sandbox_id,
@@ -205,7 +203,9 @@ fi
 echo "skill install done dest=$DEST" >&2
 """
     output = run_sandbox_command(
-        command, sandbox_id=sandbox_id, timeout=_ENV_CMD_TIMEOUT
+        command,
+        sandbox_id=sandbox_id,
+        timeout=Config.SANDBOX_ENV_INIT_TIMEOUT_SECONDS,
     )
     logger.info(
         "skill下载并安装完成 sandbox_id=%s 文件名=%s 目标目录=%s "
