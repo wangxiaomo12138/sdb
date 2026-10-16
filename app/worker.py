@@ -47,6 +47,7 @@ class TaskWorker:
         self.store.mark_running(task_id)
         started = time.monotonic()
         answer = ""
+        last_error = ""
         try:
             for event in stream_opencode(
                 task.query,
@@ -83,10 +84,13 @@ class TaskWorker:
                     )
                     return
                 elif etype == "error":
-                    raise OpenCodeError(event.get("message") or "opencode failed")
-            # 流结束但无 done/error
+                    last_error = event.get("message") or "opencode failed"
+                    continue
+            # 流结束但无 done：有正文则成功，否则用最后一条 error
             if answer:
                 self.store.mark_succeeded(task_id, answer)
+            elif last_error:
+                raise OpenCodeError(last_error)
             else:
                 raise OpenCodeError("opencode returned no result")
         except OpenCodeError as exc:

@@ -383,7 +383,16 @@ def _parse_opencode_events(
             yield {"type": "session", "opencode_session_id": session_id}
 
         etype = event.get("type")
-        if etype in {"session.error", "error"}:
+        # type=error 照常输出，但不中断：后面可能还有正文
+        if etype == "error":
+            err = event.get("error") or event.get("message") or event
+            logger.warning(
+                "OpenCode事件 类型=error 输出并继续读取 消息=%s",
+                preview(err, 500),
+            )
+            yield {"type": "error", "message": _clean_output(str(err))}
+            continue
+        if etype == "session.error":
             err = event.get("error") or event.get("message") or event
             logger.warning(
                 "OpenCode事件 类型=错误 消息=%s 原始=%s",
@@ -1165,9 +1174,6 @@ def _stream_opencode_bound(
                 continue
             if event["type"] == "error":
                 errored = True
-                # 续聊失败则清掉 OpenCode session 缓存
-                if opencode_session_id:
-                    session_sandbox_manager.clear_opencode_session_id(sandbox_id)
                 logger.warning(
                     "流式OpenCode返回错误 sandbox_id=%s "
                     "耗时毫秒=%.1f 消息=%s",
@@ -1176,7 +1182,7 @@ def _stream_opencode_bound(
                     preview(event.get("message"), 500),
                 )
                 yield event
-                return
+                continue
             if event["type"] == "done":
                 answer = event.get("answer") or answer
                 logger.info(
