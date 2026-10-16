@@ -302,12 +302,15 @@ def _build_opencode_command(
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
     file_flag = ""
     if file_paths:
+        # 每个附件单独 -f；勿写成 -f a b（array 会把后续参数也当成文件）
         file_flag = "".join(
             f"-f {shlex.quote(path)} " for path in file_paths if path
         )
-    # 环境变量已在沙箱初始化写入 profile；此处不再拼接 export
+    # 环境变量已在沙箱初始化写入 profile；此处不再拼接 export。
+    # -f 为 yargs array：若不加 --，后面的 query 会被当成文件路径，报 File not found。
     command = (
-        f"opencode run --format json {session_flag}{model_flag}{file_flag}{quoted}"
+        f"opencode run --format json {session_flag}{model_flag}{file_flag}"
+        f"-- {quoted}"
     )
     logger.info(
         "已构建OpenCode命令 模型=%s opencode_session_id=%s 附件数=%s 问题=%s",
