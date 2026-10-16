@@ -6,7 +6,9 @@ import re
 import shlex
 import subprocess
 import time
+import uuid
 from typing import Any, Generator, Iterable, Optional
+from urllib.parse import urlparse, unquote
 
 import httpx
 from agent_sandbox import Sandbox
@@ -125,11 +127,172 @@ def _opencode_env_exports() -> list[str]:
     return exports
 
 
+_SANDBOX_ENV_FILE = "$HOME/.sandbox_proxy_env.sh"
+_SANDBOX_ENV_SOURCE_MARK = "sandbox_proxy_env.sh"
+
+
+def install_sandbox_env_vars(sandbox_id: str) -> None:
+    """在沙箱初始化时写入环境变量文件，并由 login shell 自动 source。
+
+    后续 opencode / shell 经 bash -lc 执行时即可继承，无需每次命令前拼接 export。
+    """
+    exports = _opencode_env_exports()
+    body = "\n".join(
+        [
+            "# Managed by sandbox-proxy; written during sandbox env init",
+            *exports,
+            "",
+        ]
+    )
+    body_q = shlex.quote(body)
+    source_snippet = (
+        f'\n# sandbox-proxy env\n'
+        f'[ -f "{_SANDBOX_ENV_FILE}" ] && . "{_SANDBOX_ENV_FILE}"\n'
+    )
+    source_q = shlex.quote(source_snippet)
+    mark_q = shlex.quote(_SANDBOX_ENV_SOURCE_MARK)
+
+    logger.info(
+        "安装沙箱环境变量 sandbox_id=%s 变量数=%s 文件=%s",
+        sandbox_id,
+        len(exports),
+        _SANDBOX_ENV_FILE,
+    )
+    started = time.monotonic()
+    command = f"""
+ENV_FILE={_SANDBOX_ENV_FILE}
+printf '%s' {body_q} > "$ENV_FILE"
+for rc in "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+  touch "$rc"
+  if ! grep -Fq {mark_q} "$rc" 2>/dev/null; then
+    printf '%s' {source_q} >> "$rc"
+  fi
+done
+echo "sandbox env installed file=$ENV_FILE" >&2
+"""
+    run_sandbox_command(
+        command,
+        sandbox_id=sandbox_id,
+        timeout=min(60.0, Config.SANDBOX_ENV_INIT_TIMEOUT_SECONDS),
+    )
+    logger.info(
+        "沙箱环境变量安装完成 sandbox_id=%s 耗时毫秒=%.1f",
+        sandbox_id,
+        (time.monotonic() - started) * 1000,
+    )
+
+
+def _attachment_basename(url: str, index: int) -> str:
+    """从 URL path 取文件名；空则用 attach_<n>。"""
+    path = unquote(urlparse(url).path.rstrip("/"))
+    name = path.split("/")[-1] if path else ""
+    name = name.strip() or f"attach_{index}"
+    # 去掉路径穿越与空白
+    name = name.replace("/", "_").replace("\\", "_").replace("\0", "")
+    return name or f"attach_{index}"
+
+
+def _download_attachment_files(
+    sandbox_id: str,
+    urls: list[str],
+) -> list[str]:
+    """在沙箱内下载附件到 /tmp/chat_attach_<uuid>/，返回绝对路径列表。不解压。"""
+    if not urls:
+        return []
+
+    dest_dir = f"/tmp/chat_attach_{uuid.uuid4().hex}"
+    dest_dir_q = shlex.quote(dest_dir)
+    used_names: dict[str, int] = {}
+    local_paths: list[str] = []
+
+    mkdir_cmd = f"mkdir -p {dest_dir_q}"
+    run_sandbox_command(
+        mkdir_cmd,
+        sandbox_id=sandbox_id,
+        timeout=min(60.0, Config.SANDBOX_ENV_INIT_TIMEOUT_SECONDS),
+    )
+
+    timeout = Config.SANDBOX_ENV_INIT_TIMEOUT_SECONDS
+    for i, url in enumerate(urls, start=1):
+        base = _attachment_basename(url, i)
+        count = used_names.get(base, 0)
+        used_names[base] = count + 1
+        if count:
+            stem, dot, ext = base.partition(".")
+            if dot:
+                filename = f"{stem}_{count}{dot}{ext}"
+            else:
+                filename = f"{base}_{count}"
+        else:
+            filename = base
+
+        local_path = f"{dest_dir.rstrip('/')}/{filename}"
+        local_paths.append(local_path)
+        url_q = shlex.quote(url)
+        path_q = shlex.quote(local_path)
+        tmp_q = shlex.quote(f"/tmp/chat_attach_dl_{uuid.uuid4().hex}")
+
+        logger.info(
+            "开始下载附件 sandbox_id=%s 序号=%s/%s 目标=%s url=%s",
+            sandbox_id,
+            i,
+            len(urls),
+            local_path,
+            preview(url),
+        )
+        started = time.monotonic()
+        # 优先 curl（-k 跳过证书校验），失败再 wget；按原文件落盘，不解压
+        command = f"""
+TMP={tmp_q}
+URL={url_q}
+DEST={path_q}
+if command -v curl >/dev/null 2>&1; then
+  echo "attachment download using curl" >&2
+  if ! curl -kfsSL -o "$TMP" "$URL"; then
+    echo "attachment download failed via curl: $URL" >&2
+    exit 1
+  fi
+elif command -v wget >/dev/null 2>&1; then
+  echo "attachment download using wget" >&2
+  if ! wget --no-check-certificate -O "$TMP" "$URL"; then
+    echo "attachment download failed via wget: $URL" >&2
+    exit 1
+  fi
+else
+  echo 'neither curl nor wget available' >&2
+  exit 1
+fi
+if [ ! -s "$TMP" ]; then
+  echo "attachment download produced empty file: $URL" >&2
+  exit 1
+fi
+echo "attachment download size bytes=$(wc -c < "$TMP")" >&2
+mv "$TMP" "$DEST"
+echo "attachment saved dest=$DEST" >&2
+"""
+        run_sandbox_command(command, sandbox_id=sandbox_id, timeout=timeout)
+        logger.info(
+            "附件下载完成 sandbox_id=%s 目标=%s 耗时毫秒=%.1f",
+            sandbox_id,
+            local_path,
+            (time.monotonic() - started) * 1000,
+        )
+
+    logger.info(
+        "全部附件已下载 sandbox_id=%s 数量=%s 目录=%s",
+        sandbox_id,
+        len(local_paths),
+        dest_dir,
+    )
+    return local_paths
+
+
 def _build_opencode_command(
     query: str,
     *,
     opencode_session_id: Optional[str] = None,
     model: Optional[str] = None,
+    file_paths: Optional[list[str]] = None,
 ) -> str:
     quoted = shlex.quote(query)
     resolved_model = model or Config.OPENCODE_MODEL or ""
@@ -137,16 +300,20 @@ def _build_opencode_command(
     session_flag = ""
     if opencode_session_id:
         session_flag = f"--session {shlex.quote(opencode_session_id)} "
-    parts = _opencode_env_exports()
-    parts.append(
-        f"opencode run --format json {session_flag}{model_flag}{quoted}"
+    file_flag = ""
+    if file_paths:
+        file_flag = "".join(
+            f"-f {shlex.quote(path)} " for path in file_paths if path
+        )
+    # 环境变量已在沙箱初始化写入 profile；此处不再拼接 export
+    command = (
+        f"opencode run --format json {session_flag}{model_flag}{file_flag}{quoted}"
     )
-    # 必须单行：AIO 常驻 shell 遇到换行会返回 ErrorObservation（无 exit_code）
-    command = "; ".join(parts)
     logger.info(
-        "已构建OpenCode命令 模型=%s opencode_session_id=%s 问题=%s",
+        "已构建OpenCode命令 模型=%s opencode_session_id=%s 附件数=%s 问题=%s",
         resolved_model or "(default)",
         opencode_session_id or "(new)",
+        len(file_paths or []),
         preview(query),
     )
     logger.info("OpenCode命令原样(可复制调试)\n%s", command)
@@ -801,11 +968,12 @@ def _run_opencode_cli(
     *,
     timeout: float = 60.0,
 ) -> str:
-    """在 sandbox_id 对应沙箱内执行 opencode CLI（先注入 SANDBOX_ENV_VARS）。"""
+    """在 sandbox_id 对应沙箱内执行 opencode CLI。
+
+    环境变量依赖初始化阶段写入的 profile（install_sandbox_env_vars）。
+    """
     binding = _require_active_binding(sandbox_id)
-    parts = _opencode_env_exports()
-    parts.append(cli_tail)
-    command = "; ".join(parts)
+    command = cli_tail
     logger.info(
         "OpenCode CLI 开始 sandbox_id=%s 超时秒=%s 命令=%s",
         sandbox_id,
@@ -863,6 +1031,7 @@ def stream_opencode(
     sandbox_id: str,
     opencode_session_id: Optional[str] = None,
     model: Optional[str] = None,
+    files: Optional[list[str]] = None,
     timeout: Optional[float] = None,
 ) -> Generator[dict[str, Any], None, None]:
     """在已存在的沙箱上执行 opencode，产出对话事件。
@@ -871,14 +1040,16 @@ def stream_opencode(
     沙箱不存在或已过期时直接 error，不会自动创建。
     传入 opencode_session_id 则续聊；不传则开新对话（不用服务端缓存自动续聊）。
     model 有值则覆盖 OPENCODE_MODEL。
+    files 为 S3/HTTP URL 列表时，先在沙箱下载再以 -f 传给 opencode run。
     """
     timeout = Config.OPENCODE_TIMEOUT_SECONDS if timeout is None else timeout
     logger.info(
         "开始流式执行OpenCode sandbox_id=%s opencode_session_id=%s "
-        "model=%s 超时秒=%s 问题=%s",
+        "model=%s 附件数=%s 超时秒=%s 问题=%s",
         sandbox_id,
         opencode_session_id or "(new)",
         model or Config.OPENCODE_MODEL or "(default)",
+        len(files or []),
         timeout,
         preview(query),
     )
@@ -895,9 +1066,35 @@ def stream_opencode(
         yield {"type": "error", "message": _SANDBOX_MISSING}
         return
 
-    yield status_event("processing", "正在处理请求")
     session_sandbox_manager.begin_task(sandbox_id)
     try:
+        file_paths: Optional[list[str]] = None
+        if files:
+            yield status_event(
+                "downloading_attachments",
+                f"正在下载附件（{len(files)} 个）",
+            )
+            try:
+                file_paths = _download_attachment_files(
+                    binding.sandbox_id, files
+                )
+            except OpenCodeError as exc:
+                logger.warning(
+                    "附件下载失败 sandbox_id=%s 错误=%s",
+                    sandbox_id,
+                    preview(exc, 500),
+                )
+                yield {"type": "error", "message": str(exc)}
+                return
+            except Exception as exc:
+                logger.exception("附件下载未预期异常 sandbox_id=%s", sandbox_id)
+                yield {
+                    "type": "error",
+                    "message": f"attachment download failed: {exc}",
+                }
+                return
+
+        yield status_event("processing", "正在处理请求")
         yield from _stream_opencode_bound(
             query,
             sandbox_id,
@@ -905,6 +1102,7 @@ def stream_opencode(
             timeout,
             request_opencode_session_id=opencode_session_id,
             model=model,
+            file_paths=file_paths,
         )
     finally:
         session_sandbox_manager.end_task(sandbox_id)
@@ -918,21 +1116,26 @@ def _stream_opencode_bound(
     *,
     request_opencode_session_id: Optional[str] = None,
     model: Optional[str] = None,
+    file_paths: Optional[list[str]] = None,
 ) -> Generator[dict[str, Any], None, None]:
     # 续聊完全由请求参数决定，不再读取 binding.opencode_session_id
     opencode_session_id = request_opencode_session_id or None
     resolved_opencode_session_id = opencode_session_id
     command = _build_opencode_command(
-        query, opencode_session_id=opencode_session_id, model=model
+        query,
+        opencode_session_id=opencode_session_id,
+        model=model,
+        file_paths=file_paths,
     )
     answer = ""
     errored = False
     started = time.monotonic()
     logger.info(
         "已绑定沙箱准备执行 sandbox_id=%s "
-        "opencode_session_id=%s 超时秒=%s",
+        "opencode_session_id=%s 附件数=%s 超时秒=%s",
         sandbox_id,
         opencode_session_id or "(新建)",
+        len(file_paths or []),
         timeout,
     )
 
@@ -1021,15 +1224,17 @@ def run_opencode(
     sandbox_id: str,
     opencode_session_id: Optional[str] = None,
     model: Optional[str] = None,
+    files: Optional[list[str]] = None,
     timeout: Optional[float] = None,
 ) -> str:
     """在指定沙箱上跑完 OpenCode，返回本轮完整回复文本。"""
     logger.info(
         "开始同步执行OpenCode sandbox_id=%s opencode_session_id=%s "
-        "model=%s 问题=%s",
+        "model=%s 附件数=%s 问题=%s",
         sandbox_id,
         opencode_session_id or "(new)",
         model or Config.OPENCODE_MODEL or "(default)",
+        len(files or []),
         preview(query),
     )
     answer = ""
@@ -1038,6 +1243,7 @@ def run_opencode(
         sandbox_id=sandbox_id,
         opencode_session_id=opencode_session_id,
         model=model,
+        files=files,
         timeout=timeout,
     ):
         if event["type"] == "delta":

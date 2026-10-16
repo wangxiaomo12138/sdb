@@ -20,7 +20,7 @@ Client -> POST /api/sandbox/session (SSE 建环境)
 
 - Python 3.10+（推荐 3.10）
 - 远程沙箱容器内 `opencode` 可用
-- 沙箱需配置可用模型凭证（通过 `SANDBOX_ENV_VARS` 在执行 `opencode` 时注入，例如 `OPENCODE_API_KEY`，或写入 `~/.config/opencode/config.json` / `OPENCODE_JSON`）。未配置时任务会以 `failed` / SSE `error` 返回 provider 错误。
+- 沙箱需配置可用模型凭证（通过 `SANDBOX_ENV_VARS` 在**创建环境**时写入沙箱 profile，整个存活周期内对 `opencode` 生效，例如 `OPENCODE_API_KEY`；也可写入 `~/.config/opencode/config.json` / `OPENCODE_JSON`）。未配置时任务会以 `failed` / SSE `error` 返回 provider 错误。
 
 ## 快速开始
 
@@ -62,7 +62,7 @@ gunicorn -w 1 -b 0.0.0.0:5000 "run:app"
 | `SANDBOX_APIG_TIMEOUT_SECONDS` | `120` | APIG 整次请求超时 |
 | `SANDBOX_APIG_PROXY` | 空 | `requests`/`httpx` 可用；可选 HTTP 代理 |
 | `SANDBOX_INSTANCE_TIMEOUT` | `900` | 创建时生命周期（秒），平台默认过期销毁 900s |
-| `SANDBOX_ENV_VARS` | 空 | JSON 对象；非空时在执行 `opencode` 前 `export`（如 `{"PATH":"xxx/bin:$PATH"}`） |
+| `SANDBOX_ENV_VARS` | 空 | JSON 对象；创建环境时写入 `$HOME/.sandbox_proxy_env.sh` 并由 profile source（如 `{"PATH":"xxx/bin:$PATH"}`） |
 | `SANDBOX_NAS_USER_DATA_WORKSPACE_ID` 等 | 空 | 用户数据 NAS 挂载（workspaceId/subPath/mountPath/readOnly） |
 | `SANDBOX_NAS_OPENCODE_WORKSPACE_ID` 等 | 空 | OpenCode 离线包 NAS 挂载 |
 | `OPENCODE_OFFLINE_EXTRACT_PATH` | 空 | 沙箱内离线包提取/源路径 |

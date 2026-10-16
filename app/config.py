@@ -54,7 +54,7 @@ class Config:
         os.getenv("SANDBOX_READY_TIMEOUT_SECONDS", "15")
     )
 
-    # 执行 opencode 时注入的环境变量；JSON 对象，空则不附加 export
+    # 沙箱环境初始化时写入 profile 的环境变量；JSON 对象（含默认 OPENCODE_PERMISSION）
     SANDBOX_ENV_VARS = os.getenv("SANDBOX_ENV_VARS", "").strip()
 
     # 创建沙箱时的双 NAS 挂载（APIG body.x-mounts）；各组 workspaceId 为空则跳过该项

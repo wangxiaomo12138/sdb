@@ -242,6 +242,7 @@ curl 'http://127.0.0.1:5000/api/sandbox/status?sandbox_id=a1b2c3d4e5f6...'
 | `query` | string | 是 | 本轮用户问题，非空 |
 | `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
 | `model` | string | 否 | `provider/model`；有则覆盖服务端 `OPENCODE_MODEL`；空串视为未传 |
+| `file` | string[] | 否 | 附件 URL 数组（预签名 S3 等 http(s) 链接）；服务端在沙箱内下载后以 `opencode run -f` 传入；空数组视为未传 |
 
 ```json
 {
@@ -257,6 +258,19 @@ curl 'http://127.0.0.1:5000/api/sandbox/status?sandbox_id=a1b2c3d4e5f6...'
   "sandbox_id": "a1b2c3d4e5f6...",
   "query": "用一句话介绍 Python",
   "model": "bailian-token-plan/qwen3.6-plus"
+}
+```
+
+带附件：
+
+```json
+{
+  "sandbox_id": "a1b2c3d4e5f6...",
+  "query": "总结这个文档",
+  "file": [
+    "https://bucket.s3.example.com/doc.pdf?X-Amz-Signature=...",
+    "https://bucket.s3.example.com/img.png?X-Amz-Signature=..."
+  ]
 }
 ```
 
@@ -280,12 +294,12 @@ curl 'http://127.0.0.1:5000/api/sandbox/status?sandbox_id=a1b2c3d4e5f6...'
 
 | `type` | 字段 | 说明 |
 |--------|------|------|
-| `status` | `stage`, `message` | 提问路径进度（如检查沙箱、正在处理） |
+| `status` | `stage`, `message` | 提问路径进度（如检查沙箱、下载附件、正在处理） |
 | `delta` | `text` | 助手增量文本 |
 | `done` | `answer`, `opencode_session_id` | 本轮结束；`opencode_session_id` 供后续续聊 |
-| `error` | `message` | 执行失败 |
+| `error` | `message` | 执行失败（含附件下载失败） |
 
-提问路径常见 `stage`：`request_received`、`checking_sandbox`、`processing`。
+提问路径常见 `stage`：`request_received`、`checking_sandbox`、`processing`；有 `file` 时在 `processing` 前出现 `downloading_attachments`。
 
 示例流：
 
@@ -293,6 +307,8 @@ curl 'http://127.0.0.1:5000/api/sandbox/status?sandbox_id=a1b2c3d4e5f6...'
 data: {"type":"status","stage":"request_received","message":"接收到用户请求"}
 
 data: {"type":"status","stage":"checking_sandbox","message":"检查沙箱状态"}
+
+data: {"type":"status","stage":"downloading_attachments","message":"正在下载附件（2 个）"}
 
 data: {"type":"status","stage":"processing","message":"正在处理请求"}
 
@@ -328,6 +344,11 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"sandbox_id":"sbx-xxxx...","query":"用一句话介绍 Python","model":"bailian-token-plan/qwen3.6-plus"}'
 
+# 带附件（S3 预签名 URL）
+curl -N -X POST http://127.0.0.1:5000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"sandbox_id":"sbx-xxxx...","query":"总结这个文档","file":["https://bucket.s3.example.com/doc.pdf"]}'
+
 # 第二轮（显式传入 opencode_session_id 续聊）
 curl -N -X POST http://127.0.0.1:5000/api/chat \
   -H 'Content-Type: application/json' \
@@ -358,6 +379,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 | `query` | string | 是 | 用户问题 |
 | `opencode_session_id` | string | 否 | 指定 OpenCode 会话续聊；省略则新开 |
 | `model` | string | 否 | `provider/model`；有则覆盖服务端 `OPENCODE_MODEL`；空串视为未传 |
+| `file` | string[] | 否 | 附件 URL 数组（预签名 S3 等）；下载后以 `-f` 传给 opencode |
 
 ```json
 {
@@ -376,7 +398,7 @@ curl -N -X POST http://127.0.0.1:5000/api/chat \
 }
 ```
 
-若请求带了 `opencode_session_id` 或 `model`，`202` 响应会原样带回；最终以任务结果中的值为准。
+若请求带了 `opencode_session_id`、`model` 或 `file`，`202` 响应会原样带回；最终以任务结果中的值为准。
 
 #### 示例
 
@@ -468,7 +490,7 @@ curl http://127.0.0.1:5000/api/tasks/550e8400-e29b-41d4-a716-446655440000
 
 ### `GET /api/models`
 
-在已绑定沙箱内执行 `opencode models <provider>`（执行前注入 `SANDBOX_ENV_VARS`）。
+在已绑定沙箱内执行 `opencode models <provider>`（环境变量依赖建环境时写入的 profile）。
 
 #### Query 参数
 
@@ -512,7 +534,7 @@ curl 'http://127.0.0.1:5000/api/models?sandbox_id=a1b2c3d4e5f6...&provider=baili
 
 ### `GET /api/sessions`
 
-在已绑定沙箱内执行 `opencode session list --format json`（执行前注入 `SANDBOX_ENV_VARS`）。
+在已绑定沙箱内执行 `opencode session list --format json`（环境变量依赖建环境时写入的 profile）。
 
 #### Query 参数
 
@@ -551,7 +573,7 @@ curl 'http://127.0.0.1:5000/api/sessions?sandbox_id=a1b2c3d4e5f6...'
 
 ### `GET /api/sessions/detail`
 
-在已绑定沙箱内执行 `opencode export <opencode_session_id>`（执行前注入 `SANDBOX_ENV_VARS`）。
+在已绑定沙箱内执行 `opencode export <opencode_session_id>`（环境变量依赖建环境时写入的 profile）。
 
 #### Query 参数
 
@@ -591,8 +613,8 @@ curl 'http://127.0.0.1:5000/api/sessions/detail?sandbox_id=a1b2c3d4e5f6...&openc
 | `GET` | `/health` | 健康检查 |
 | `POST` | `/api/sandbox/session` | SSE 创建/复用沙箱环境 |
 | `GET` | `/api/sandbox/status` | 查询 APIG 沙箱实例状态 |
-| `POST` | `/api/chat` | SSE 流式对话（可选 `opencode_session_id` 续聊、可选 `model`） |
-| `POST` | `/api/query` | 异步提交（非流式；可选 `model`） |
+| `POST` | `/api/chat` | SSE 流式对话（可选 `opencode_session_id` / `model` / `file`） |
+| `POST` | `/api/query` | 异步提交（非流式；可选 `model` / `file`） |
 | `GET` | `/api/tasks/<task_id>` | 查询异步任务结果与进度 |
 | `GET` | `/api/models` | OpenCode 指定 provider 的模型列表 |
 | `GET` | `/api/sessions` | OpenCode 历史 session 列表 |

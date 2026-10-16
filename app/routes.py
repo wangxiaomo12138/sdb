@@ -4,7 +4,8 @@ import json
 import logging
 import time
 import uuid
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
+from urllib.parse import urlparse
 
 from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
@@ -66,10 +67,65 @@ def _parse_optional_model(
     return _parse_optional_string_field(body, "model")
 
 
+def _parse_optional_file_urls(
+    body: dict,
+) -> Union[Optional[List[str]], Tuple[None, Tuple[Response, int]]]:
+    """解析可选 file（S3/HTTP URL 数组）；空/缺省返回 None。"""
+    raw = body.get("file")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        logger.warning(
+            "请求参数校验失败 原因=file类型错误 路径=%s",
+            request.path,
+        )
+        return None, (
+            jsonify({"error": "file must be an array of http(s) URL strings"}),
+            400,
+        )
+    urls: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            logger.warning(
+                "请求参数校验失败 原因=file元素非法 路径=%s",
+                request.path,
+            )
+            return None, (
+                jsonify(
+                    {
+                        "error": (
+                            "file entries must be non-empty http(s) URL strings"
+                        )
+                    }
+                ),
+                400,
+            )
+        url = item.strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            logger.warning(
+                "请求参数校验失败 原因=file非http(s) 路径=%s url=%s",
+                request.path,
+                preview(url),
+            )
+            return None, (
+                jsonify(
+                    {
+                        "error": (
+                            f"file entries must be http(s) URLs, got {url!r}"
+                        )
+                    }
+                ),
+                400,
+            )
+        urls.append(url)
+    return urls or None
+
+
 def _parse_sandbox_query(
     body: dict,
 ) -> Union[
-    Tuple[str, str, Optional[str], Optional[str]],
+    Tuple[str, str, Optional[str], Optional[str], Optional[List[str]]],
     Tuple[None, Tuple[Response, int]],
 ]:
     query = body.get("query")
@@ -100,7 +156,10 @@ def _parse_sandbox_query(
     model = _parse_optional_model(body)
     if isinstance(model, tuple):
         return model
-    return sandbox_id.strip(), query.strip(), oc, model
+    files = _parse_optional_file_urls(body)
+    if isinstance(files, tuple):
+        return files
+    return sandbox_id.strip(), query.strip(), oc, model, files
 
 
 def _require_query_sandbox_id() -> Union[str, Tuple[Response, int]]:
@@ -266,14 +325,15 @@ def chat():
     if parsed[0] is None:
         err_resp, status = parsed[1]  # type: ignore[misc]
         return err_resp, status
-    sandbox_id, query, opencode_session_id, model = parsed  # type: ignore[misc]
+    sandbox_id, query, opencode_session_id, model, files = parsed  # type: ignore[misc]
     logger.info(
         "收到流式对话请求 请求ID=%s sandbox_id=%s opencode_session_id=%s "
-        "model=%s 问题=%s 来源IP=%s",
+        "model=%s 附件数=%s 问题=%s 来源IP=%s",
         req_id,
         sandbox_id,
         opencode_session_id or "(new)",
         model or "(default)",
+        len(files or []),
         preview(query),
         request.remote_addr,
     )
@@ -294,6 +354,7 @@ def chat():
                 sandbox_id=sandbox_id,
                 opencode_session_id=opencode_session_id,
                 model=model,
+                files=files,
             ):
                 etype = event.get("type") or "other"
                 if etype == "delta":
@@ -359,7 +420,7 @@ def create_query():
     if parsed[0] is None:
         err_resp, status = parsed[1]  # type: ignore[misc]
         return err_resp, status
-    sandbox_id, query, opencode_session_id, model = parsed  # type: ignore[misc]
+    sandbox_id, query, opencode_session_id, model, files = parsed  # type: ignore[misc]
 
     store = current_app.extensions["task_store"]
     worker = current_app.extensions["task_worker"]
@@ -369,6 +430,7 @@ def create_query():
         sandbox_id=sandbox_id,
         opencode_session_id=opencode_session_id,
         model=model,
+        file=files,
     )
     # 提交前先快照：worker 可能立刻改同一 Task 对象
     payload = {
@@ -380,13 +442,16 @@ def create_query():
         payload["opencode_session_id"] = opencode_session_id
     if model:
         payload["model"] = model
+    if files:
+        payload["file"] = files
     logger.info(
         "异步查询已受理 任务ID=%s sandbox_id=%s opencode_session_id=%s "
-        "model=%s 问题=%s 来源IP=%s",
+        "model=%s 附件数=%s 问题=%s 来源IP=%s",
         task.task_id,
         sandbox_id,
         opencode_session_id or "(new)",
         model or "(default)",
+        len(files or []),
         preview(query),
         request.remote_addr,
     )

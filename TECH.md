@@ -100,7 +100,7 @@ app/
 
 ### 4.4 Session 列表与详情
 
-1. `GET /api/sessions?sandbox_id=…` → `export SANDBOX_ENV_VARS…; opencode session list --format json`
+1. `GET /api/sessions?sandbox_id=…` → `opencode session list --format json`（env 已在建环境写入 profile）
 2. `GET /api/sessions/detail?sandbox_id=…&opencode_session_id=…` → `opencode export <id>`
 3. 均经 `get_active` + `begin_task` / `end_task`，与 chat 同一沙箱
 
@@ -275,7 +275,7 @@ Worker 消费 `stream_opencode`：`status` → `append_stage`；`done` → `mark
 
 - Python 3.10+，依赖见 `requirements.txt`（Flask、httpx、agent-sandbox、gunicorn）。
 - gunicorn **必须** `-w 1`。
-- 沙箱镜像内需要可用的 `opencode` 及模型凭证。可在 `SANDBOX_ENV_VARS`（JSON）中配置，于执行 `opencode` 前 `export`（例如 `PATH`、`XDG_CONFIG_HOME`、`OPENCODE_API_KEY`）。
+- 沙箱镜像内需要可用的 `opencode` 及模型凭证。可在 `SANDBOX_ENV_VARS`（JSON）中配置；**创建环境**时写入 `$HOME/.sandbox_proxy_env.sh` 并由 `.profile` / `.bashrc` source，整个沙箱存活周期内对 `opencode` 生效（例如 `PATH`、`XDG_CONFIG_HOME`、`OPENCODE_API_KEY`）。
 - 对话时长受 `OPENCODE_TIMEOUT_SECONDS` 与沙箱 TTL 限制。任务执行中若剩余 TTL 进入 120s 窗口会 refresh 900s；空闲不续期。
 
 ## 9. 扩展时注意

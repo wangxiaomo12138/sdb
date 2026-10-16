@@ -9,7 +9,12 @@ from urllib.parse import urlparse
 
 from app.config import Config
 from app.logging_utils import preview
-from app.sandbox_client import OpenCodeError, run_sandbox_command, status_event
+from app.sandbox_client import (
+    OpenCodeError,
+    install_sandbox_env_vars,
+    run_sandbox_command,
+    status_event,
+)
 from app.sandbox_lifecycle import SandboxLifecycleError
 from app.session_sandbox import session_sandbox_manager
 
@@ -335,14 +340,15 @@ def stream_create_sandbox_env(
         )
         try:
             _copy_opencode_offline(sandbox_id)
+            install_sandbox_env_vars(sandbox_id)
             session_sandbox_manager.mark_opencode_initialized(sandbox_id)
             logger.info(
-                "OpenCode初始化完成 sandbox_id=%s",
+                "OpenCode初始化完成 sandbox_id=%s（含环境变量写入 profile）",
                 sandbox_id,
             )
         except OpenCodeError as exc:
             logger.error(
-                "OpenCode离线包初始化失败 sandbox_id=%s 错误=%s",
+                "OpenCode离线包/环境变量初始化失败 sandbox_id=%s 错误=%s",
                 sandbox_id,
                 preview(exc, 500),
             )
